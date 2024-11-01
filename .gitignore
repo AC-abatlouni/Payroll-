@@ -1,0 +1,9 @@
+test*
+scratch*
+pivot1.py   
+pivot2.py
+pivot3.py   
+*.log
+*.csv
+*.xlsx
+*.xls
