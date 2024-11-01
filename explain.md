@@ -106,6 +106,18 @@ Technicians qualify for different commission rates based on their SCP and ICP pe
 - Reduction Amount: Average ticket value multiplied by the number of TGLs.
 - Formula: `Total Threshold Reduction = Average Ticket Value × Number of TGLs`
 
+### Department Rules for TGL Spiffs
+- TGL spiffs (2% of TGL revenue) are only awarded when the technician generates a lead for their own department
+- Departments are determined by Business Unit number ranges:
+  - HVAC: Business Units 20-29
+  - Plumbing: Business Units 30-39
+  - Electric: Business Units 40-49
+- Example: An HVAC technician (Business Unit 25) who generates a lead for:
+  - HVAC (Business Unit 20-29): Receives 2% TGL spiff
+  - Plumbing (Business Unit 30-39): No TGL spiff
+  - Electric (Business Unit 40-49): No TGL spiff
+- The threshold reduction benefit applies regardless of department
+
 ### Adjusted Thresholds After TGL Reduction:
 `Adjusted Threshold = max(0, Adjusted Threshold − Total Threshold Reduction)`
 
