@@ -40,20 +40,49 @@ def setup_logging():
     logger.setLevel(logging.DEBUG)
     
     current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # File handler - keeps detailed DEBUG logs
     fh = logging.FileHandler(f'commission_calculations_{current_time}.log')
     fh.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    fh.setFormatter(file_formatter)
+    
+    # Console handler - only shows critical info and progress
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
-    
-    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    console_formatter = logging.Formatter('%(levelname)s - %(message)s')
-    fh.setFormatter(file_formatter)
+    console_formatter = logging.Formatter('%(message)s')  # Simplified console output
     ch.setFormatter(console_formatter)
+    
+    # Add filters to prevent duplicate messages
+    class ConsoleFilter(logging.Filter):
+        def filter(self, record):
+            return record.levelno == logging.INFO and not any(x in record.msg for x in [
+                'Department Summary',
+                'Completed:',
+                'Sales:',
+                'Total:',
+                'Spiffs:',
+                'Commissionable Revenue:',
+                'Commission:',
+                'Processing technician'
+            ])
+    
+    ch.addFilter(ConsoleFilter())
     
     logger.addHandler(fh)
     logger.addHandler(ch)
     
     return logger
+
+def format_currency(amount):
+    """Format number as currency string."""
+    try:
+        if isinstance(amount, str):
+            # Remove '$' and ',' from string before converting
+            amount = float(amount.replace('$', '').replace(',', ''))
+        return f"${amount:,.2f}"
+    except (ValueError, TypeError):
+        return "$0.00"
 
 def get_user_date() -> datetime:
     while True:
@@ -70,6 +99,24 @@ def extract_department_number(memo: str) -> int:
     except Exception as e:
         logger.warning(f"Could not extract department number from memo: {memo}")
         return 0
+
+def get_department_with_code(dept_num: int) -> str:
+    """
+    Returns department name with department code range.
+    
+    Args:
+        dept_num (int): Department number from business unit
+        
+    Returns:
+        str: Formatted string with department name and code range
+    """
+    if 20 <= dept_num <= 29:
+        return 'HVAC (20-29)'
+    elif 30 <= dept_num <= 39:
+        return 'Plumbing (30-39)'
+    elif 40 <= dept_num <= 49:
+        return 'Electric (40-49)'
+    return 'Unknown (0)'
 
 def get_department_from_number(dept_num: int) -> str:
     if 20 <= dept_num <= 29:
@@ -154,41 +201,74 @@ def get_valid_tgls(file_path: str, tech_name: str) -> List[dict]:
                 logger.debug(f"Valid TGL found - Job #: {tgl.get('Job #', 'N/A')}, "
                            f"From: {source_unit} To: {target_unit}")
         
-        logger.info(f"Found {len(valid_tgls)} valid TGLs for {tech_name}")
         return valid_tgls
         
     except Exception as e:
         logger.error(f"Error processing TGL data for {tech_name}: {str(e)}")
         return []
 
-def get_spiffs_total(file_path: str, tech_name: str) -> float:
-    """Get total spiffs amount from Direct Payroll Adjustments."""
+def get_spiffs_total(file_path: str, tech_name: str) -> tuple[float, dict[str, float]]:
+    """
+    Get total spiffs amount and department-specific spiffs from Direct Payroll Adjustments.
+    Returns tuple of (total_spiffs, department_spiffs_dict)
+    """
     try:
         spiffs_df = pd.read_excel(file_path, sheet_name='Direct Payroll Adjustments')
         tech_spiffs = spiffs_df[spiffs_df['Technician'] == tech_name]
         
         spiffs_total = 0
-        for _, spiff in tech_spiffs.iterrows():
-            amount = float(spiff['Amount']) if pd.notnull(spiff['Amount']) else 0
-            memo_lower = str(spiff['Memo']).lower() if pd.notnull(spiff['Memo']) else ''
+        department_spiffs = {
+            'HVAC': 0,
+            'Plumbing': 0,
+            'Electric': 0
+        }
+        
+        for idx, spiff in tech_spiffs.iterrows():
+            amount = float(str(spiff['Amount']).replace('$', '').replace(',', '').strip()) if pd.notnull(spiff['Amount']) else 0
+            memo = str(spiff['Memo']).strip() if pd.notnull(spiff['Memo']) else ''
             
-            if 'tgl' in memo_lower or '2%' in memo_lower:
-                logger.debug(f"Skipping TGL entry: ${amount:,.2f} - Memo: {spiff['Memo']}")
+            # Skip entries with specific conditions
+            if ('tgl' in memo.lower() or 
+                '2% commission' in memo.lower() or 
+                'reversal of commission' in memo.lower() or
+                'commission deduction' in memo.lower()):
+                logger.debug(f"Skipping entry: ${amount:,.2f} - Memo: {memo}")
                 continue
             
-            if amount < 0 and 'commission' in memo_lower:
-                logger.debug(f"Skipping negative commission entry: ${amount:,.2f} - Memo: {spiff['Memo']}")
-                continue
+            # Validate memo format
+            if not memo[:2].isdigit():
+                logger.error(f"Invalid memo format - must start with department number. Row {idx + 2}: {memo}")
+                raise ValueError(f"Invalid memo format - must start with department number. Row {idx + 2}: {memo}")
+            
+            dept_num = int(memo[:2])
+            if not (20 <= dept_num <= 29 or 30 <= dept_num <= 39 or 40 <= dept_num <= 49):
+                logger.error(f"Invalid department number in memo (must be 20-29, 30-39, or 40-49). Row {idx + 2}: {memo}")
+                raise ValueError(f"Invalid department number in memo (must be 20-29, 30-39, or 40-49). Row {idx + 2}: {memo}")
+            
+            # Check for content after department number
+            memo_content = memo[2:].strip().lstrip('-').strip()
+            if not memo_content:
+                logger.warning(f"Warning: Memo contains no description after department number. Row {idx + 2}: {memo}")
+            
+            # Add to appropriate department total based on department number
+            if 20 <= dept_num <= 29:
+                department_spiffs['HVAC'] += amount
+                logger.debug(f"Added HVAC spiff: ${amount:,.2f} - Memo: {memo}")
+            elif 30 <= dept_num <= 39:
+                department_spiffs['Plumbing'] += amount
+                logger.debug(f"Added Plumbing spiff: ${amount:,.2f} - Memo: {memo}")
+            elif 40 <= dept_num <= 49:
+                department_spiffs['Electric'] += amount
+                logger.debug(f"Added Electric spiff: ${amount:,.2f} - Memo: {memo}")
             
             spiffs_total += amount
-            logger.debug(f"Added spiff: ${amount:,.2f} - Memo: {spiff['Memo']}")
         
-        logger.info(f"Total spiffs for {tech_name}: ${spiffs_total:,.2f}")
-        return spiffs_total
+        return spiffs_total, department_spiffs
         
     except Exception as e:
         logger.error(f"Error processing spiffs data for {tech_name}: {str(e)}")
-        return 0
+        raise  # Re-raise the exception to stop program execution
+
 
 def calculate_box_metrics(data: pd.DataFrame, tech_name: str) -> Tuple[float, float, float]:
     # Calculate CJR (Box A)
@@ -246,13 +326,11 @@ def calculate_percentages(box_a: float, box_c: float) -> Tuple[int, int]:
 
 def calculate_average_ticket_value(data: pd.DataFrame, tech_name: str) -> float:
     qualifying_jobs = data[
-        (data['Primary Technician'] == tech_name) & 
-        (data['Opportunity'] == True)
+        (data['Primary Technician'] == tech_name)
     ]
     
     logger.debug(f"Average ticket calculation for {tech_name}:")
     logger.debug(f"Total jobs as Primary Tech: {len(data[data['Primary Technician'] == tech_name])}")
-    logger.debug(f"Jobs marked as True Opportunities: {len(qualifying_jobs)}")
     
     if len(qualifying_jobs) == 0:
         logger.debug(f"No qualifying True Opportunity jobs found for {tech_name}")
@@ -326,7 +404,6 @@ def get_excused_hours(file_path: str, sheet_name: str = '2024') -> Dict[str, int
                 hours_summary[technician_name] = total_hours
                 logger.debug(f"Found {total_hours} excused hours for {technician_name}")
         
-        logger.info(f"Found excused hours for {len(hours_summary)} technicians")
         return hours_summary
         
     except Exception as e:
@@ -417,9 +494,12 @@ def get_commission_rate(total_revenue: float, flipped_percent: float, department
     logger.debug(f"Final commission rate: {rate}")
     return rate, adjusted_thresholds, tier_thresholds
 
-def format_department_revenue(revenue_data: Dict[str, Dict[str, float]], commission_rate: float) -> Dict[str, str]:
+def format_department_revenue(revenue_data: Dict[str, Dict[str, float]], 
+                            commission_rate: float,
+                            department_spiffs: Dict[str, float]) -> Dict[str, str]:
     """
     Format department revenue data into strings for Excel output, including commission calculations.
+    Takes into account department-specific spiffs when calculating commission.
     """
     formatted = {}
     
@@ -429,15 +509,25 @@ def format_department_revenue(revenue_data: Dict[str, Dict[str, float]], commiss
         sales = revenue_data['sales'][dept]
         combined = revenue_data['combined'][dept]
         
+        # Deduct department-specific spiffs from combined revenue
+        dept_spiffs = department_spiffs[dept]
+        adjusted_combined = combined - dept_spiffs
+        
         formatted[f"{dept} Completed"] = f"${completed:,.2f}"
         formatted[f"{dept} Sales"] = f"${sales:,.2f}"
-        formatted[f"{dept} Total"] = f"${combined:,.2f}"
-        formatted[f"{dept} Commission"] = f"${(combined * commission_rate):,.2f}"
+        formatted[f"{dept} Total"] = f"${adjusted_combined:,.2f}"  # Use adjusted total
+        formatted[f"{dept} Commission"] = f"${(adjusted_combined * commission_rate):,.2f}"  # Use calculated commission rate
+        
+        logger.debug(f"{dept} breakdown:")
+        logger.debug(f"  Combined Revenue: ${combined:,.2f}")
+        logger.debug(f"  Department Spiffs: ${dept_spiffs:,.2f}")
+        logger.debug(f"  Adjusted Total: ${adjusted_combined:,.2f}")
+        logger.debug(f"  Commission Rate: {commission_rate*100}%")
+        logger.debug(f"  Final Commission: ${(adjusted_combined * commission_rate):,.2f}")
     
     return formatted
 
 def main():
-    logger.info("Starting commission calculations")
     
     technicians_to_track = [
         "Andrew Wycoff", "Andy Ventura", "Artie Straniti", "Brett Allen", "Carter Bruce",
@@ -484,8 +574,8 @@ def main():
         # Calculate department-specific revenue
         dept_revenue = calculate_department_revenue(data, tech_name)
         
-        # Get spiffs
-        spiffs_total = get_spiffs_total(file_path, tech_name)
+        # Get spiffs with department breakdown
+        spiffs_total, department_spiffs = get_spiffs_total(file_path, tech_name)
         
         # Get valid TGLs
         valid_tgls = get_valid_tgls(file_path, tech_name)
@@ -496,8 +586,9 @@ def main():
         # Get department
         dept_unit_str = tech_dept_map.get(tech_name, '0')
         dept_num = extract_department_number(dept_unit_str) if isinstance(dept_unit_str, str) else 0
-        department = get_department_from_number(dept_num)
-        
+        department = get_department_from_number(dept_num)  # Keep this for internal logic
+        department_with_code = get_department_with_code(dept_num)  # New formatted version
+
         # Calculate TGL threshold reduction
         tgl_reduction = avg_ticket * len(valid_tgls) if avg_ticket > 0 else 0
         
@@ -512,8 +603,12 @@ def main():
         base_threshold_scale = format_threshold_scale(base_thresholds)
         adjusted_threshold_scale = format_threshold_scale(adjusted_thresholds)
         
-        # Calculate department-specific commissions
-        formatted_dept_data = format_department_revenue(dept_revenue, commission_rate)
+        # Calculate department-specific commissions with spiff reductions
+        formatted_dept_data = format_department_revenue(
+            dept_revenue,
+            commission_rate,
+            department_spiffs
+        )
         
         # Calculate total commissionable revenue (excluding spiffs)
         commissionable_revenue = box_c - spiffs_total
@@ -523,7 +618,7 @@ def main():
         result = {
             # Identifying Info
             'Technician': tech_name,
-            'Main Dept': department,
+            'Main Dept': department_with_code,
             
             # Revenue Components
             'Total Revenue': box_c,
@@ -533,16 +628,20 @@ def main():
             # Department-specific Revenue and Commission
             'HVAC Revenue': formatted_dept_data['HVAC Completed'],
             'HVAC Sales': formatted_dept_data['HVAC Sales'],
+            'HVAC Spiffs': format_currency(department_spiffs['HVAC']),
             'HVAC Total': formatted_dept_data['HVAC Total'],
             'HVAC Commission': formatted_dept_data['HVAC Commission'],
+
             
             'Plumbing Revenue': formatted_dept_data['Plumbing Completed'],
             'Plumbing Sales': formatted_dept_data['Plumbing Sales'],
+            'Plumbing Spiffs': format_currency(department_spiffs['Plumbing']),
             'Plumbing Total': formatted_dept_data['Plumbing Total'],
             'Plumbing Commission': formatted_dept_data['Plumbing Commission'],
             
             'Electric Revenue': formatted_dept_data['Electric Completed'],
             'Electric Sales': formatted_dept_data['Electric Sales'],
+            'Electric Spiffs': format_currency(department_spiffs['Electric']),
             'Electric Total': formatted_dept_data['Electric Total'],
             'Electric Commission': formatted_dept_data['Electric Commission'],
             
@@ -569,16 +668,6 @@ def main():
         }
         
         results.append(result)
-        
-        # Log detailed department summary
-        logger.info(f"\nDepartment Summary for {tech_name}:")
-        for dept in ['HVAC', 'Plumbing', 'Electric']:
-            if dept_revenue['combined'][dept] > 0:
-                logger.info(f"{dept}:")
-                logger.info(f"  Completed: ${dept_revenue['completed'][dept]:,.2f}")
-                logger.info(f"  Sales: ${dept_revenue['sales'][dept]:,.2f}")
-                logger.info(f"  Total: ${dept_revenue['combined'][dept]:,.2f}")
-                logger.info(f"  Commission: ${(dept_revenue['combined'][dept] * commission_rate):,.2f}")
 
     # Create DataFrame and write to Excel
     results_df = pd.DataFrame(results)
