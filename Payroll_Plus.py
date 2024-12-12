@@ -866,18 +866,21 @@ def sum_spiffs_for_dept(spiffs_df: pd.DataFrame, tech_name: str, dept_code: str)
     
     return amounts.sum()
 
-def process_paystats(paystats_file: str, tech_data: pd.DataFrame, target_date: str, logger: logging.Logger) -> List[PayrollEntry]:
+def process_paystats(output_dir: str, paystats_file: str, tech_data: pd.DataFrame, target_date: str, logger: logging.Logger) -> List[PayrollEntry]:
     """Process paystats file to generate payroll entries."""
     logger.info("Processing paystats file for payroll entries...")
     payroll_entries = []
 
     try:
-        # Load paystats data
-        stats_df = pd.read_excel(paystats_file)
-        logger.debug(f"Successfully loaded {len(stats_df)} records from paystats")
+        # Define combined file path
+        combined_file = os.path.join(output_dir, 'combined_data.xlsx')
 
-        # Load spiffs data from Direct Payroll Adjustments
-        combined_file = os.path.join(os.path.expanduser(r'~\Downloads'), 'combined_data.xlsx')
+        # Ensure the file exists
+        if not os.path.exists(combined_file):
+            raise FileNotFoundError(f"Combined data file not found in {output_dir}")
+
+        # Load paystats and spiffs data
+        stats_df = pd.read_excel(paystats_file)
         adj_df = pd.read_excel(combined_file, sheet_name='Direct Payroll Adjustments')
 
         # Process each technician
@@ -950,12 +953,20 @@ def process_paystats(paystats_file: str, tech_data: pd.DataFrame, target_date: s
         logger.error(f"Error processing paystats file: {str(e)}")
         raise
 
-def process_gp_entries(combined_file: str, tech_data: pd.DataFrame, target_date: str, logger: logging.Logger) -> List[PayrollEntry]:
+
+def process_gp_entries(output_dir: str, tech_data: pd.DataFrame, target_date: str, logger: logging.Logger) -> List[PayrollEntry]:
     """Process GP values from Invoices sheet to generate payroll entries."""
     logger.info("Processing GP entries from Invoices sheet...")
     payroll_entries = []
 
     try:
+        # Define combined file path
+        combined_file = os.path.join(output_dir, 'combined_data.xlsx')
+
+        # Ensure the file exists
+        if not os.path.exists(combined_file):
+            raise FileNotFoundError(f"Combined data file not found in {output_dir}")
+
         # Read the Invoices sheet
         invoices_df = pd.read_excel(combined_file, sheet_name='Invoices')
         logger.debug(f"Loaded {len(invoices_df)} records from Invoices sheet")
@@ -1014,6 +1025,7 @@ def process_gp_entries(combined_file: str, tech_data: pd.DataFrame, target_date:
     except Exception as e:
         logger.error(f"Error processing GP entries: {str(e)}")
         raise
+
 
 def process_adjustments(combined_file: str, logger: logging.Logger) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Process adjustments data and split into positive and negative adjustments."""
@@ -1297,10 +1309,10 @@ def process_payroll(base_path: str, output_dir: str, base_date: datetime, logger
         tech_data = read_tech_department_data(combined_file, logger)
         
         # Generate payroll entries from paystats
-        payroll_entries = process_paystats(paystats_file, tech_data, target_date, logger)
+        payroll_entries = process_paystats(output_dir, paystats_file, tech_data, target_date, logger)
         
         # Generate payroll entries from GP
-        gp_entries = process_gp_entries(combined_file, tech_data, target_date, logger)
+        gp_entries = process_gp_entries(output_dir, tech_data, target_date, logger)
         
         # Combine all payroll entries
         all_payroll_entries = payroll_entries + gp_entries
@@ -1317,6 +1329,7 @@ def process_payroll(base_path: str, output_dir: str, base_date: datetime, logger
     except Exception as e:
         logger.error(f"Error in payroll processing: {str(e)}")
         raise
+
 
 def main():
     """Main program entry point."""
