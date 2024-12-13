@@ -97,6 +97,242 @@ DEPARTMENT_CODES = {
     '41': {'code': '4100000', 'desc': 'ELECTRICAL INSTALL'}
 }
 
+class DateValidator:
+    @staticmethod
+    def parse_filename_date_range(filename: str) -> Optional[Tuple[datetime, datetime]]:
+        """Extract date range from filename patterns like 'MM_DD_YY - MM_DD_YY'"""
+        pattern = r'(\d{2}_\d{2}_\d{2})\s*-\s*(\d{2}_\d{2}_\d{2})'
+        match = re.search(pattern, filename)
+        
+        if not match:
+            return None
+            
+        try:
+            start_str, end_str = match.groups()
+            start_date = datetime.strptime(start_str, '%m_%d_%y')
+            end_date = datetime.strptime(end_str, '%m_%d_%y')
+            return start_date, end_date
+        except ValueError:
+            return None
+
+    @staticmethod
+    def get_week_range(date: datetime, show_message: bool = False) -> Tuple[datetime, datetime]:
+        """
+        Get the Monday-Sunday dates for the week containing the input date.
+        Any date entered will map to its corresponding week's Monday-Sunday range.
+        """
+        # Get Monday of the week (subtract days until we hit Monday)
+        start_of_week = date - timedelta(days=date.weekday())
+        # Get Sunday (add 6 days to Monday)
+        end_of_week = start_of_week + timedelta(days=6)
+        
+        if show_message:
+            print(f"\nInput date {date.strftime('%m/%d/%y')} ({date.strftime('%A')})")
+            print(f"Maps to week: {start_of_week.strftime('%m/%d/%y')} (Monday) - {end_of_week.strftime('%m/%d/%y')} (Sunday)")
+        
+        return start_of_week, end_of_week
+
+    @staticmethod
+    def format_date_for_comparison(date: datetime) -> str:
+        """Format date as MM_DD_YY for string comparison"""
+        return date.strftime('%m_%d_%y')
+
+    @staticmethod
+    def format_date_for_display(date: datetime) -> str:
+        """Format date as MM/DD/YY for display"""
+        return date.strftime('%m/%d/%y')
+
+    @classmethod
+    def analyze_uuid_file_dates(cls, file_path: str) -> Optional[Tuple[datetime, datetime]]:
+        """Analyze UUID file dates from Direct Payroll Adjustments sheet"""
+        try:
+            df = pd.read_excel(file_path, sheet_name='Direct Payroll Adjustments')
+            
+            if 'Posted On' not in df.columns:
+                return None
+                
+            if not pd.api.types.is_datetime64_any_dtype(df['Posted On']):
+                df['Posted On'] = pd.to_datetime(df['Posted On'])
+            
+            # Get min and max dates from Posted On column, excluding NaN values
+            valid_dates = df['Posted On'].dropna()
+            if valid_dates.empty:
+                return None
+                
+            earliest_date = valid_dates.min()
+            latest_date = valid_dates.max()
+            
+            print(f"\n\"Posted On\"column in UUID file date range: {earliest_date.strftime('%m/%d/%y')} to {latest_date.strftime('%m/%d/%y')}")
+            
+            return earliest_date.to_pydatetime(), latest_date.to_pydatetime()
+            
+        except Exception as e:
+            print(f"\nDEBUG: Error in analyze_uuid_file_dates: {str(e)}")
+            return None
+
+    @classmethod
+    def validate_files_for_date(cls, directory: str, user_date: datetime) -> Tuple[bool, List[str], Optional[List[str]], dict]:
+        start_week, end_week = cls.get_week_range(user_date, show_message=True)
+        expected_start = cls.format_date_for_comparison(start_week)
+        expected_end = cls.format_date_for_comparison(end_week)
+
+        errors = []
+        found_files = {}
+
+        file_patterns = {
+            'tech': f"Technician Department_Dated {expected_start} - {expected_end}.xlsx",
+            'tgl': f"TGLs Set _Dated {expected_start} - {expected_end}.xlsx",
+            'jobs': f"Copy of Jobs Report for Performance -DE2_Dated {expected_start} - {expected_end}.xlsx"
+        }
+
+        # Check each expected file
+        for file_type, expected_pattern in file_patterns.items():
+            matching_files = glob.glob(os.path.join(directory, expected_pattern))
+            
+            if not matching_files:
+                # Check if files exist with different dates
+                pattern_base = expected_pattern.split('Dated')[0] + "Dated *"
+                existing_files = glob.glob(os.path.join(directory, pattern_base))
+                if existing_files:
+                    # Found files but wrong week
+                    example_file = os.path.basename(existing_files[0])
+                    date_range = cls.parse_filename_date_range(example_file)
+                    if date_range:
+                        actual_start, actual_end = date_range
+                        errors.append(
+                            f"Found {file_type} file for different week "
+                            f"({cls.format_date_for_display(actual_start)} - "
+                            f"{cls.format_date_for_display(actual_end)})"
+                        )
+                    else:
+                        errors.append(f"Found {file_type} file but couldn't parse its date range")
+                else:
+                    errors.append(f"Missing {file_type} file for week of {cls.format_date_for_display(start_week)}")
+            else:
+                found_files[file_type] = matching_files[0]
+
+        # Check UUID files
+        uuid_files = glob.glob(os.path.join(directory, "????????-????-????-????-????????????.xlsx"))
+        if not uuid_files:
+            errors.append("Missing UUID file")
+            return len(errors) == 0, errors, None, {}
+        
+        # Time off file
+        time_off_file = os.path.join(directory, "Approved_Time_Off 2023.xlsx")
+        if not os.path.exists(time_off_file):
+            errors.append("Missing Time Off file")
+        else:
+            found_files['time_off'] = time_off_file
+
+        return len(errors) == 0, errors, uuid_files, found_files
+
+    @classmethod
+    def validate_files_for_date_with_uuid(cls, directory: str, user_date: datetime, selected_uuid: str) -> Tuple[bool, List[str]]:
+        """Validate files with a specific UUID file."""
+        is_valid, errors, uuid_files, found_files_dummy = cls.validate_files_for_date(directory, user_date)
+        
+        # Remove any UUID-related errors as we're using a specific one
+        errors = [e for e in errors if not ("UUID file" in e)]
+        
+        # Validate the selected UUID file
+        start_week, end_week = cls.get_week_range(user_date)
+        uuid_dates = cls.analyze_uuid_file_dates(selected_uuid)
+        
+        if uuid_dates:
+            uuid_start, uuid_end = uuid_dates
+
+            # Use the same mid-week coverage requirement as in validate_files_for_date
+            mid_week_start = start_week + timedelta(days=2)  # Wednesday
+            mid_week_end = start_week + timedelta(days=4)    # Friday
+
+            if not (uuid_start.date() <= mid_week_start.date() and uuid_end.date() >= mid_week_end.date()):
+                errors.append(
+                    f"Selected UUID file data range ({cls.format_date_for_display(uuid_start)} - "
+                    f"{cls.format_date_for_display(uuid_end)}) "
+                    f"does not cover the mid-week (Wed-Fri)."
+                )
+        
+        return len(errors) == 0, errors
+
+def get_validated_user_date(base_path: str) -> Tuple[datetime, str, dict]:
+    validator = DateValidator()
+
+    def get_uuid_file_choice(uuid_files: List[str]) -> str:
+        most_recent = os.path.basename(max(uuid_files, key=os.path.getmtime))
+        print(f"\n- Multiple UUID files found. Will use most recent: {most_recent}")
+        
+        while True:
+            choice = input("\nIs this acceptable? (Y/N): ").strip().upper()
+            if choice in ['Y', 'N']:
+                break
+            print("Invalid input. Please enter Y or N.")
+        
+        if choice == 'Y':
+            return max(uuid_files, key=os.path.getmtime)
+        
+        while True:
+            print("\nPlease either:")
+            print("1. Enter the name of the UUID file from within your Downloads folder")
+            print("2. Type \"exit\", or press ctrl+c to exit program")
+            filename = input().strip()
+                            
+            if filename.lower() == 'exit':
+                print("\nExiting program. Please ensure you have the correct files and try again.")
+                sys.exit(0)
+
+            matching_files = [f for f in uuid_files if os.path.basename(f) == filename]
+            if not matching_files:
+                print(f"\nError: {filename} not found in Downloads folder.")
+                print("Available UUID files:")
+                for f in uuid_files:
+                    print(f"- {os.path.basename(f)}")
+                continue
+            
+            confirm = input(f"\nYou entered {filename}, is this correct? (Y/N): ").strip().upper()
+            if confirm == 'Y':
+                return matching_files[0]
+            elif confirm == 'N':
+                continue
+            else:
+                print("Invalid input. Please enter Y or N.")
+
+    while True:
+        print("\nEnter a date (mm/dd/yy) or 'exit' to quit: ")
+        user_input = input().strip()
+        
+        if user_input.lower() == 'exit':
+            print("\nExiting program. Please ensure you have the correct files and try again.")
+            sys.exit(0)
+        
+        try:
+            date = datetime.strptime(user_input, '%m/%d/%y')
+        except ValueError:
+            print("Invalid date format. Please use mm/dd/yy format (e.g., 12/22/24)")
+            continue
+        
+        is_valid, errors, uuid_files, found_files = validator.validate_files_for_date(base_path, date)
+        
+        if uuid_files and len(uuid_files) > 1:
+            selected_uuid_file = get_uuid_file_choice(uuid_files)
+            found_files['uuid'] = selected_uuid_file
+            is_valid, errors = validator.validate_files_for_date_with_uuid(base_path, date, selected_uuid_file)
+        elif uuid_files and len(uuid_files) == 1:
+            found_files['uuid'] = uuid_files[0]
+
+        if is_valid and 'uuid' in found_files:
+            print("All required files found with correct date ranges!")
+            return date, found_files['uuid'], found_files
+        else:
+            print("\nFile validation errors found:")
+            for error in errors:
+                print(f"- {error}")
+            print("\nPlease either:")
+            print("1. Enter a different date")
+            print("2. Download the correct files for this date")
+            print("3. Type 'exit' to quit the program")
+            continue
+
+
 SUBDEPARTMENT_MAP = {
     '00': '00 - ADMINISTRATIVE',
     '41': '41 - ELECTRICAL INSTALL',
@@ -118,33 +354,33 @@ SUBDEPARTMENT_MAP = {
 
 # Technician Badge Map
 TECH_BADGE_MAP = {
-    "Andrew Wycoff": "J6P100665",
-    "Andy Ventura": "J6P100622",
-    "Artie Straniti": "J6P100524",
-    "Brett Allen": "J6P100591",
-    "Carter Bruce": "J6P100426",
-    "Chris Smith": "J6P100430",
-    "David Knox": "J6P100633",
-    "Ethan Ficklin": "J6P100310",
-    "Garrett Caine": "J6P100522",
-    "Glenn Griffin": "J6P100297",
-    "Hunter Stanley": "J6P100536",
-    "Jacob Simpson": "J6P100512",
-    "Jake West": "J6P100520",
-    "John Williams": "J6P100529",
-    "Josue Rodriguez": "J6P100553",
-    "Justin Barron": "J6P100377",
-    "Kevin Stanley": "J6P100655",
-    "Pablo Silvas": "J6P100594",
-    "Patrick Bowerman": "J6P100502",
-    "Robert McGhee": "J6P100667",
-    "Ronnie Bland": "J6P100133",
-    "Shawn Hollingsworth": "J6P100696",
-    "Stephen Starner": "J6P100521",
-    "Thomas Shawaryn": "J6P100434",
-    "Tim Miller": "J6P100485",
-    "WT Settle": "J6P100283",
-    "Will Winfree": "J6P100708"
+    "Andrew Wycoff": "J6P000100665",
+    "Andy Ventura": "J6P000100622",
+    "Artie Straniti": "J6P000100524",
+    "Brett Allen": "J6P000100591",
+    "Carter Bruce": "J6P000100426",
+    "Chris Smith": "J6P000100430",
+    "David Knox": "J6P000100633",
+    "Ethan Ficklin": "J6P000100310",
+    "Garrett Caine": "J6P000100522",
+    "Glenn Griffin": "J6P000100297",
+    "Hunter Stanley": "J6P000100536",
+    "Jacob Simpson": "J6P000100512",
+    "Jake West": "J6P000100520",
+    "John Williams": "J6P000100529",
+    "Josue Rodriguez": "J6P000100553",
+    "Justin Barron": "J6P000100377",
+    "Kevin Stanley": "J6P000100655",
+    "Pablo Silvas": "J6P000100594",
+    "Patrick Bowerman": "J6P000100502",
+    "Robert McGhee": "J6P000100667",
+    "Ronnie Bland": "J6P000100133",
+    "Shawn Hollingsworth": "J6P000100696",
+    "Stephen Starner": "J6P000100521",
+    "Thomas Shawaryn": "J6P000100434",
+    "Tim Miller": "J6P000100485",
+    "WT Settle": "J6P000100283",
+    "Will Winfree": "J6P000100708"
 }
 
 # Dataclass definitions
@@ -240,14 +476,6 @@ def format_currency(amount):
     except (ValueError, TypeError):
         return "$0.00"
 
-def get_user_date() -> datetime:
-    """Get date input from user."""
-    while True:
-        try:
-            date_str = input("Enter a date (mm/dd/yy): ")
-            return datetime.strptime(date_str, '%m/%d/%y')
-        except ValueError:
-            print("Invalid date format. Please use mm/dd/yy format (e.g., 03/15/24)")
 
 def extract_subdepartment_code(business_unit):
     """Extract specific two-digit subdepartment code from business unit."""
@@ -825,10 +1053,10 @@ def process_commission_calculations(data: pd.DataFrame, tech_data: pd.DataFrame,
     return results_df[COLUMN_ORDER]
 
 def read_tech_department_data(file_path: str, logger: logging.Logger) -> pd.DataFrame:
-    """Read technician department data from combined file."""
     try:
         logger.debug(f"Reading technician department data from {file_path}")
-        tech_df = pd.read_excel(file_path, sheet_name='Sheet1_Tech')
+        # Specify dtype for Payroll ID to ensure it's read as a string
+        tech_df = pd.read_excel(file_path, sheet_name='Sheet1_Tech', dtype={'Payroll ID': str})
         logger.debug(f"Successfully loaded {len(tech_df)} technician records")
         return tech_df
     except Exception as e:
@@ -990,6 +1218,8 @@ def process_gp_entries(output_dir: str, tech_data: pd.DataFrame, target_date: st
             technician = row['Technician']
             business_unit = row['Business Unit']
             badge_id = row['Payroll ID']
+            if pd.notna(badge_id) and not str(badge_id).startswith('J6P'):
+                badge_id = f"J6P{badge_id}"
             total_gp = row['GP']
 
             if total_gp == 0:
@@ -1196,21 +1426,17 @@ def find_latest_files(directory):
         'tgl': tgl_file
     }
 
-def combine_workbooks(directory, output_file):
-    """Combine all workbooks into a single file."""
-    validate_required_files(directory)
-    files = find_latest_files(directory)
-    
-    # Start by copying the UUID file as our base
+def combine_workbooks(directory, output_file, files):
+    """Combine all workbooks into a single file using the pre-selected files."""
+    # Copy the UUID file as the base
     shutil.copy2(files['uuid'], output_file)
-    
-    # Open target workbook
+
     target_wb = load_workbook(filename=output_file)
-    
+
     # AutoFit UUID file sheets
     for sheet in target_wb.sheetnames:
         autofit_columns(target_wb[sheet])
-    
+
     # Copy from Jobs Report
     source_wb = load_workbook(filename=files['jobs'], data_only=True)
     source_ws = source_wb['Sheet1']
@@ -1218,23 +1444,27 @@ def combine_workbooks(directory, output_file):
         target_wb.remove(target_wb['Sheet1'])
     target_wb.create_sheet('Sheet1')
     target_ws = target_wb['Sheet1']
-    
+
     for row in source_ws:
         for cell in row:
-            target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            # If the cell's value is a datetime, set a date-only format
+            if isinstance(cell.value, datetime):
+                new_cell.number_format = 'mm/dd/yyyy'
     autofit_columns(target_ws)
-    
+
     # Copy from Tech Department
     source_wb = load_workbook(filename=files['tech'], data_only=True)
     source_ws = source_wb['Sheet1']
     target_wb.create_sheet('Sheet1_Tech')
     target_ws = target_wb['Sheet1_Tech']
-    
     for row in source_ws:
         for cell in row:
-            target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            if isinstance(cell.value, datetime):
+                new_cell.number_format = 'mm/dd/yyyy'
     autofit_columns(target_ws)
-    
+
     # Copy from Time Off
     source_wb = load_workbook(filename=files['time_off'], data_only=True)
     source_ws = source_wb['2024']
@@ -1242,28 +1472,30 @@ def combine_workbooks(directory, output_file):
         target_wb.remove(target_wb['2024'])
     target_wb.create_sheet('2024')
     target_ws = target_wb['2024']
-    
     for row in source_ws:
         for cell in row:
-            target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            if isinstance(cell.value, datetime):
+                new_cell.number_format = 'mm/dd/yyyy'
     autofit_columns(target_ws)
-    
-    # Copy from TGLs Set if file exists
-    if files['tgl']:
+
+    # Copy from TGL file if exists
+    if 'tgl' in files and files['tgl']:
         source_wb = load_workbook(filename=files['tgl'], data_only=True)
         source_ws = source_wb['Sheet1']
         if 'Sheet1_TGL' in target_wb.sheetnames:
             target_wb.remove(target_wb['Sheet1_TGL'])
         target_wb.create_sheet('Sheet1_TGL')
         target_ws = target_wb['Sheet1_TGL']
-        
         for row in source_ws:
             for cell in row:
-                target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+                new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+                if isinstance(cell.value, datetime):
+                    new_cell.number_format = 'mm/dd/yyyy'
         autofit_columns(target_ws)
-    
+
     target_wb.save(output_file)
-    return files
+
 
 def process_calculations(base_path: str, output_dir: str, logger: logging.Logger,
                          start_of_week: datetime, end_of_week: datetime):
@@ -1330,7 +1562,6 @@ def process_payroll(base_path: str, output_dir: str, base_date: datetime, logger
         logger.error(f"Error in payroll processing: {str(e)}")
         raise
 
-
 def main():
     """Main program entry point."""
     try:
@@ -1339,18 +1570,19 @@ def main():
         print("\nWelcome to the Commission Processing System\n")
         print("Before proceeding, please ensure the following files are in your Downloads folder:")
         print("\n1. UUID file (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.xlsx)")
-        print("2. Jobs Report (format: Copy of Jobs Report for Performance -DE2_Dated *.xlsx)")
-        print("3. Tech Department file (format: Technician Department_Dated *.xlsx)")
+        print("2. Jobs Report (format: Copy of Jobs Report for Performance -DE2_Dated MM_DD_YY - MM_DD_YY.xlsx)")
+        print("3. Tech Department file (format: Technician Department_Dated MM_DD_YY - MM_DD_YY.xlsx)")
         print("4. Time Off file (name: Approved_Time_Off 2023.xlsx)")
-        print("5. TGL file (format: TGLs Set _Dated *.xlsx)")
+        print("5. TGL file (format: TGLs Set _Dated MM_DD_YY - MM_DD_YY.xlsx)")
         print("\nThe program will:")
-        print("1. Combine all worksheets into 'combined_data.xlsx'")
-        print("2. Calculate commissions and create 'paystats.xlsx'")
-        print("3. Process payroll and create 'payroll.xlsx'")
-        print("4. Generate adjustment reports ('adjustments.xlsx' and 'adjustments_negative.xlsx')")
+        print("1. Validate that all required files exist with matching date ranges")
+        print("2. Combine all worksheets into 'combined_data.xlsx'")
+        print("3. Calculate commissions and create 'paystats.xlsx'")
+        print("4. Process payroll and create 'payroll.xlsx'")
+        print("5. Generate adjustment reports ('adjustments.xlsx' and 'adjustments_negative.xlsx')")
         print("\nAll output files will be created in your Downloads folder.")
         print("\n" + "="*80)
-
+    
         while True:
             response = input("\nAre all required files ready in the Downloads folder? (Y/N): ").strip().upper()
             if response == 'Y':
@@ -1361,36 +1593,28 @@ def main():
             else:
                 print("Invalid input. Please enter Y or N.")
 
-        # Setup logging
+        base_path = os.path.expanduser(r'~\Downloads')
+        base_date, selected_uuid, found_files = get_validated_user_date(base_path)
+
+        start_of_week = base_date - timedelta(days=base_date.weekday())
+        end_of_week = start_of_week + timedelta(days=6)
+
         global logger
         logger = setup_logging('commission_processor')
         logger.info("Starting commission processing...")
-
-        # Define base path
-        base_path = os.path.expanduser(r'~\Downloads')
-
-        # Get the base date and calculate the week range
-        base_date = get_user_date()
-        start_of_week = base_date - timedelta(days=base_date.weekday())
-        end_of_week = start_of_week + timedelta(days=6)
         logger.info(f"Using week range: {start_of_week.date()} to {end_of_week.date()}")
 
-        # Create output directory
         output_dir = create_output_directory(base_path, start_of_week, end_of_week, logger)
-
-        # Define output file for combined data
         combined_file = os.path.join(output_dir, 'combined_data.xlsx')
 
-        # Step 1: Combine workbooks
+        # Pass found_files directly
         logger.info("Combining workbooks...")
-        combine_workbooks(base_path, combined_file)
+        combine_workbooks(base_path, combined_file, found_files)
         logger.info("Workbook combination completed!")
 
-        # Step 2: Process calculations
         logger.info("\nStarting calculations...")
         process_calculations(base_path, output_dir, logger, start_of_week, end_of_week)
 
-        # Step 3: Process payroll
         logger.info("\nStarting payroll processing...")
         process_payroll(base_path, output_dir, base_date, logger)
 
@@ -1399,8 +1623,6 @@ def main():
     except Exception as e:
         logger.error(f"Fatal error in main process: {str(e)}")
         sys.exit(1)
-
-
 
 if __name__ == "__main__":
     main()
