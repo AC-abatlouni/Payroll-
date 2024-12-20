@@ -41,6 +41,7 @@ COLUMN_ORDER = [
     # Electric Department Subdepartments
     '40 Revenue', '40 Sales', '40 Total',
     '41 Revenue', '41 Sales', '41 Total',
+    '42 Revenue', '42 Sales', '42 Total',
     # Electric Department Totals
     'Electric Revenue', 'Electric Sales', 'Electric Spiffs', 'Electric Total', 'Electric Commission',
     # Performance Metrics
@@ -94,8 +95,10 @@ DEPARTMENT_CODES = {
     '33': {'code': '3300000', 'desc': 'PLUMBING DRAIN CLEANING'},
     '34': {'code': '3400000', 'desc': 'PLUMBING EXCAVATION'},
     '40': {'code': '4000000', 'desc': 'ELECTRICAL SERVICE'},
-    '41': {'code': '4100000', 'desc': 'ELECTRICAL INSTALL'}
+    '41': {'code': '4100000', 'desc': 'ELECTRICAL INSTALL'},
+    '42': {'code': '4200000', 'desc': 'GENERATOR MAINTENANCE'}
 }
+
 
 class DateValidator:
     @staticmethod
@@ -352,36 +355,68 @@ SUBDEPARTMENT_MAP = {
     '30': '30 - PLUMBING SERVICE'
 }
 
-# Technician Badge Map
-TECH_BADGE_MAP = {
-    "Andrew Wycoff": "J6P000100665",
-    "Andy Ventura": "J6P000100622",
-    "Artie Straniti": "J6P000100524",
-    "Brett Allen": "J6P000100591",
-    "Carter Bruce": "J6P000100426",
-    "Chris Smith": "J6P000100430",
-    "David Knox": "J6P000100633",
-    "Ethan Ficklin": "J6P000100310",
-    "Garrett Caine": "J6P000100522",
-    "Glenn Griffin": "J6P000100297",
-    "Hunter Stanley": "J6P000100536",
-    "Jacob Simpson": "J6P000100512",
-    "Jake West": "J6P000100520",
-    "John Williams": "J6P000100529",
-    "Josue Rodriguez": "J6P000100553",
-    "Justin Barron": "J6P000100377",
-    "Kevin Stanley": "J6P000100655",
-    "Pablo Silvas": "J6P000100594",
-    "Patrick Bowerman": "J6P000100502",
-    "Robert McGhee": "J6P000100667",
-    "Ronnie Bland": "J6P000100133",
-    "Shawn Hollingsworth": "J6P000100696",
-    "Stephen Starner": "J6P000100521",
-    "Thomas Shawaryn": "J6P000100434",
-    "Tim Miller": "J6P000100485",
-    "WT Settle": "J6P000100283",
-    "Will Winfree": "J6P000100708"
-}
+EXCLUDED_TECHS = [
+    "Michael Appleton",
+    "Bill Dooly",
+    "David Forney", 
+    "Dave Elphee",
+    "Jim Pumphrey",
+    "David Franklin",
+    "Mike Wright",
+    "Devyn Hitt",
+    "Stuart Deary",
+    "Jason Knight",
+    "Larry Armell",
+    "Chris Smith",
+    "Will Winfree",
+    "Trey Holt III",
+    "Gilberto Corvetto"
+
+]
+
+def format_badge_id(payroll_id: str) -> str:
+    """Clean and return the payroll ID."""
+    if pd.isna(payroll_id):
+        return None
+    return str(payroll_id).strip()
+
+def determine_tech_type(business_unit: str) -> str:
+    """
+    Determine technician type based on business unit.
+    
+    Returns:
+        str: One of three values:
+        - 'ADMIN' for administrative/sales staff (to be disregarded)
+        - 'SERVICE' for service technicians (PCM, eligible for paystats and spiffs/TGL)
+        - 'INSTALL' for installers (ICM, eligible for GP and spiffs/TGL)
+    """
+    try:
+        if pd.isna(business_unit):
+            logger.debug(f"Empty business unit, defaulting to ADMIN")
+            return 'ADMIN'
+            
+        bu_upper = str(business_unit).upper()
+        logger.debug(f"Checking business unit: {bu_upper}")
+        
+        # First check for administrative/sales units
+        admin_patterns = ['ADMINISTRATIVE', '23 -', 'SALES']
+        if any(pattern in bu_upper for pattern in admin_patterns):
+            logger.debug(f"Business unit {business_unit} identified as ADMIN")
+            return 'ADMIN'
+            
+        # Then check for service units
+        service_patterns = ['SERVICE']
+        if any(pattern in bu_upper for pattern in service_patterns):
+            logger.debug(f"Business unit {business_unit} identified as SERVICE")
+            return 'SERVICE'
+            
+        # Everything else (INSTALL, EXCAVATION, etc.) is considered an installer
+        logger.debug(f"Business unit {business_unit} identified as INSTALL")
+        return 'INSTALL'
+        
+    except Exception as e:
+        logger.error(f"Error determining tech type for business unit {business_unit}: {str(e)}")
+        return 'ADMIN'  # Default to ADMIN in case of errors
 
 # Dataclass definitions
 @dataclass
@@ -547,6 +582,7 @@ def extract_department_range(business_unit, logger):
         logger.warning(f"Could not extract department range from business unit: {business_unit}")
         return range(0, 0)
 
+
 def is_same_department(source_unit, target_unit, logger=None):
     """Check if two business units are in the same department."""
     source_range = extract_department_range(source_unit, logger)
@@ -555,6 +591,7 @@ def is_same_department(source_unit, target_unit, logger=None):
     return (len(source_range) > 0 and 
             len(target_range) > 0 and 
             source_range.start == target_range.start)
+
 
 def get_valid_tgls(file_path: str, tech_name: str) -> List[dict]:
     """Get valid TGLs for a technician."""
@@ -962,7 +999,7 @@ def format_department_revenue(revenue_data: Dict[str, Dict[str, float]],
     formatted = {}
     
     # Format subdepartment totals
-    for subdept_code in ['20', '21', '22', '24', '25', '27', '30', '31', '33', '34', '40', '41']:
+    for subdept_code in ['20', '21', '22', '24', '25', '27', '30', '31', '33', '34', '40', '41', '42']:
         completed = subdept_breakdown['completed'].get(subdept_code, 0)
         sales = subdept_breakdown['sales'].get(subdept_code, 0)
         total = subdept_breakdown['total'].get(subdept_code, 0)
@@ -1017,9 +1054,10 @@ def calculate_department_revenue(data: pd.DataFrame, tech_name: str, base_date: 
         ]
         
         for _, job in dept_completed_jobs.iterrows():
-            revenue = job.get('Jobs Total Revenue', 0) or 0
-            revenue_by_dept['completed'][dept] += revenue
-            revenue_by_dept['combined'][dept] += revenue
+            if job.get('Opportunity', False):
+                revenue = job.get('Jobs Total Revenue', 0) or 0
+                revenue_by_dept['completed'][dept] += revenue
+                revenue_by_dept['combined'][dept] += revenue
     
     # Get sales within date range
     sold_jobs = data[
@@ -1137,54 +1175,54 @@ def get_commission_rate(total_revenue: float, flipped_percent: float, department
 def process_commission_calculations(data: pd.DataFrame, tech_data: pd.DataFrame, 
                                  file_path: str, base_date: datetime,
                                  excused_hours_dict: Dict[str, int]) -> pd.DataFrame:
-    """Process commission calculations for all technicians."""
+    """Process commission calculations for service technicians only."""
     results = []
-    technicians_to_track = list(TECH_BADGE_MAP.keys())
+    
+    # Filter tech_data to only include service technicians
+    service_techs = tech_data[
+        (~tech_data['Name'].isin(EXCLUDED_TECHS)) &
+        (tech_data['Technician Business Unit'].apply(
+            lambda x: determine_tech_type(x) == 'SERVICE'
+        ))
+    ]['Name'].tolist()
+    
     tech_dept_map = dict(zip(tech_data['Name'], tech_data['Technician Business Unit']))
 
-    for tech_name in technicians_to_track:
+    for tech_name in service_techs:
         logger.info(f"\nProcessing technician: {tech_name}")
-        badge_id = TECH_BADGE_MAP.get(tech_name, '')
+        # Get badge ID from tech_data
+        badge_id = tech_data.loc[tech_data['Name'] == tech_name, 'Badge ID'].iloc[0]
         
-        # Basic calculations with subdepartment tracking
+        # Calculate metrics
         box_a, box_b, box_c, subdept_breakdown = calculate_box_metrics(data, tech_name, base_date)
         scp, icp = calculate_percentages(box_a, box_c)
         
-        # Calculate department-specific revenue
         dept_revenue = calculate_department_revenue(data, tech_name, base_date)
         
-        # Get spiffs with department breakdown
         spiffs_total, department_spiffs = get_spiffs_total(file_path, tech_name)
         
-        # Get valid TGLs
         valid_tgls = get_valid_tgls(file_path, tech_name)
         
-        # Calculate average ticket values
         avg_tickets = calculate_average_ticket_value(data, tech_name, box_a, box_b, base_date, logger)
         default_ticket = 0.0
         avg_ticket_value = avg_tickets.get('overall', default_ticket) if avg_tickets else default_ticket
         
-        # Get department
         dept_unit_str = tech_dept_map.get(tech_name, '0')
         dept_num = extract_department_number(dept_unit_str)
         department = get_department_from_number(dept_num)
         department_with_code = get_department_with_code(dept_num)
 
-        # Calculate TGL threshold reduction
         tgl_reduction = avg_ticket_value * len(valid_tgls) if avg_ticket_value > 0 else 0
         
         excused_hours = excused_hours_dict.get(tech_name, 0)
         
-        # Calculate commission rate using ICP
         commission_rate, adjusted_thresholds, base_thresholds = get_commission_rate(
             box_c, icp, department, excused_hours, tgl_reduction, avg_ticket_value
         )
         
-        # Format threshold scales
         base_threshold_scale = format_threshold_scale(base_thresholds)
         adjusted_threshold_scale = format_threshold_scale(adjusted_thresholds)
         
-        # Format revenue data including subdepartments
         formatted_dept_data = format_department_revenue(
             dept_revenue,
             commission_rate,
@@ -1192,11 +1230,9 @@ def process_commission_calculations(data: pd.DataFrame, tech_data: pd.DataFrame,
             subdept_breakdown
         )
         
-        # Calculate total commissionable revenue
         commissionable_revenue = box_c - spiffs_total
         final_commission = commissionable_revenue * commission_rate
         
-        # Build result dictionary
         result = {
             'Badge ID': badge_id,
             'Technician': tech_name,
@@ -1219,13 +1255,12 @@ def process_commission_calculations(data: pd.DataFrame, tech_data: pd.DataFrame,
             'Status': f"Qualified for {commission_rate*100}% tier" if commission_rate > 0 else "Did not qualify"
         }
         
-        # Add formatted department and subdepartment data
         result.update(formatted_dept_data)
         results.append(result)
 
     results_df = pd.DataFrame(results)
     
-    # Ensure all required columns exist and are in correct order
+    # Ensure all columns are present in the correct order
     for col in COLUMN_ORDER:
         if col not in results_df.columns:
             results_df[col] = ''
@@ -1235,10 +1270,21 @@ def process_commission_calculations(data: pd.DataFrame, tech_data: pd.DataFrame,
 def read_tech_department_data(file_path: str, logger: logging.Logger) -> pd.DataFrame:
     try:
         logger.debug(f"Reading technician department data from {file_path}")
-        # Specify dtype for Payroll ID to ensure it's read as a string
+        # Read the Excel file
         tech_df = pd.read_excel(file_path, sheet_name='Sheet1_Tech', dtype={'Payroll ID': str})
+        
+        # Remove rows where Name is numeric
+        tech_df = tech_df[~tech_df['Name'].astype(str).str.isnumeric()]
+        
+        # Filter out excluded techs
+        tech_df = tech_df[~tech_df['Name'].isin(EXCLUDED_TECHS)]
+        
+        # Format badge IDs
+        tech_df['Badge ID'] = tech_df['Payroll ID'].apply(format_badge_id)
+        
         logger.debug(f"Successfully loaded {len(tech_df)} technician records")
         return tech_df
+        
     except Exception as e:
         logger.error(f"Error reading technician department data: {str(e)}")
         raise
@@ -1252,9 +1298,9 @@ def determine_pay_code(business_unit: str) -> Optional[str]:
     if 'ADMINISTRATIVE' in bu_upper:
         return None
     elif 'SERVICE' in bu_upper:
-        return 'PC'
+        return 'PCM'
     else:
-        return 'IC'
+        return 'ICM'
 
 def sum_spiffs_for_dept(spiffs_df: pd.DataFrame, tech_name: str, dept_code: str) -> float:
     """Sum spiffs for a specific technician and department code."""
@@ -1275,220 +1321,433 @@ def sum_spiffs_for_dept(spiffs_df: pd.DataFrame, tech_name: str, dept_code: str)
     return amounts.sum()
 
 def process_paystats(output_dir: str, paystats_file: str, tech_data: pd.DataFrame, target_date: str, logger: logging.Logger) -> List[PayrollEntry]:
-    """Process paystats file to generate payroll entries."""
-    logger.info("Processing paystats file for payroll entries...")
+    """Process payroll entries for service technicians from paystats file."""
+    logger.info("Processing payroll entries from paystats file...")
     payroll_entries = []
 
     try:
-        # Define combined file path
-        combined_file = os.path.join(output_dir, 'combined_data.xlsx')
-
-        # Ensure the file exists
-        if not os.path.exists(combined_file):
-            raise FileNotFoundError(f"Combined data file not found in {output_dir}")
-
-        # Load paystats and spiffs data
         stats_df = pd.read_excel(paystats_file)
-        adj_df = pd.read_excel(combined_file, sheet_name='Direct Payroll Adjustments')
+        adj_df = pd.read_excel(os.path.join(output_dir, 'combined_data.xlsx'), sheet_name='Direct Payroll Adjustments')
 
-        # Process each technician
+        # Filter to only include service technicians
+        stats_df = stats_df[
+            (~stats_df['Technician'].isin(EXCLUDED_TECHS)) &
+            (stats_df['Technician'].isin(
+                tech_data[
+                    tech_data['Technician Business Unit'].apply(
+                        lambda x: determine_tech_type(x) == 'SERVICE'
+                    )
+                ]['Name']
+            ))
+        ]
+
         for _, row in stats_df.iterrows():
-            badge_id = row['Badge ID']
             tech_name = row['Technician']
             commission_rate = row['Commission Rate %'] / 100
 
-            # Get business unit to determine pay code
-            tech_bu = tech_data.loc[tech_data['Name'] == tech_name, 'Technician Business Unit'].iloc[0] \
-                if not tech_data[tech_data['Name'] == tech_name].empty else None
-            pay_code = determine_pay_code(tech_bu)
-
-            if not pay_code:
-                logger.debug(f"Skipping {tech_name} - No valid pay code")
+            # Skip if no commission rate
+            if commission_rate == 0:
                 continue
 
-            # Process each subdepartment
+            badge_id = tech_data.loc[tech_data['Name'] == tech_name, 'Badge ID'].iloc[0]
+            if pd.isna(badge_id):
+                continue
+
+            tech_bu = tech_data.loc[tech_data['Name'] == tech_name, 'Technician Business Unit'].iloc[0]
+            pay_code = determine_pay_code(tech_bu)
+            if not pay_code:
+                continue
+
             for dept_code in DEPARTMENT_CODES.keys():
+                revenue_col = f"{dept_code} Revenue"
+                sales_col = f"{dept_code} Sales"
                 total_col = f"{dept_code} Total"
+                
+                if not all(col in row.index for col in [revenue_col, sales_col, total_col]):
+                    continue
+                
+                def parse_amount(val):
+                    if pd.isna(val):
+                        return 0.0
+                    if isinstance(val, str):
+                        return float(val.replace('$', '').replace(',', '').strip() or 0)
+                    return float(val or 0)
+
+                revenue = parse_amount(row[revenue_col])
+                sales = parse_amount(row[sales_col])
+                total = parse_amount(row[total_col])
+
+                if revenue == 0 and sales == 0 and total == 0:
+                    continue
+
                 try:
-                    # Initialize variables
-                    total_amount = 0.0
                     spiffs_total = sum_spiffs_for_dept(adj_df, tech_name, dept_code)
-
-                    # Get total amount if it exists
-                    if total_col in row:
-                        total_str = str(row[total_col])
-                        if total_str:
-                            try:
-                                total_amount = float(total_str.replace('$', '').replace(',', ''))
-                            except ValueError:
-                                total_amount = 0.0
-
-                    # Calculate adjusted amount
-                    adjusted_amount = round(total_amount - spiffs_total, 2)
-                    final_amount = round(adjusted_amount * commission_rate, 2)
-
-                    # Skip if final amount is zero
-                    if final_amount == 0:
+                    # Only subtract positive spiffs from revenue, ignore negative ones
+                    spiff_adjustment = max(0, spiffs_total)
+                    adjusted_amount = round(total - spiff_adjustment, 2)
+                    
+                    if adjusted_amount <= 0:
                         continue
 
+                    final_amount = round(adjusted_amount * commission_rate, 2)
+                    if final_amount <= 0:
+                        continue
+
+                    # Create payroll entry with standardized PCM code for service techs
                     entry = PayrollEntry(
                         company_code=COMPANY_CODE,
                         badge_id=badge_id,
                         date=target_date,
                         amount=final_amount,
-                        pay_code=pay_code,
+                        pay_code='PCM',  # Standardized to PCM for all service tech entries
                         dept=DEPARTMENT_CODES[dept_code]['code'],
                         location_id=LOCATION_ID
                     )
                     payroll_entries.append(entry)
-
-                    logger.debug(
-                        f"{tech_name} - Dept {dept_code}: "
-                        f"Total=${total_amount:,.2f}, "
-                        f"Spiffs=${spiffs_total:,.2f}, "
-                        f"Adjusted=${adjusted_amount:,.2f}, "
-                        f"Final Amount=${final_amount:,.2f}"
-                    )
+                    logger.debug(f"Created commission entry for {tech_name} in dept {dept_code}: ${final_amount:,.2f}")
+                    logger.debug(f"  Total: ${total:,.2f}")
+                    logger.debug(f"  Spiffs: ${spiffs_total:,.2f}")
+                    logger.debug(f"  Spiff Adjustment: ${spiff_adjustment:,.2f}")
+                    logger.debug(f"  Adjusted Amount: ${adjusted_amount:,.2f}")
+                    logger.debug(f"  Commission Rate: {commission_rate*100}%")
 
                 except (ValueError, KeyError) as e:
-                    logger.warning(f"Error processing {total_col} for {tech_name}: {str(e)}")
+                    logger.warning(f"Error processing department {dept_code} for {tech_name}: {str(e)}")
                     continue
 
-        logger.info(f"Generated {len(payroll_entries)} payroll entries")
         return payroll_entries
 
     except Exception as e:
         logger.error(f"Error processing paystats file: {str(e)}")
         raise
 
-
 def process_gp_entries(output_dir: str, tech_data: pd.DataFrame, target_date: str, logger: logging.Logger) -> List[PayrollEntry]:
-    """Process GP values from Invoices sheet to generate payroll entries."""
-    logger.info("Processing GP entries from Invoices sheet...")
+    """Process GP entries from Invoices sheet, specifically for installers."""
+    logger.info("Processing GP entries for installers from Invoices sheet...")
     payroll_entries = []
 
     try:
-        # Define combined file path
-        combined_file = os.path.join(output_dir, 'combined_data.xlsx')
+        # Read invoices data - specifically from the "Invoices" sheet
+        invoices_df = pd.read_excel(os.path.join(output_dir, 'combined_data.xlsx'), sheet_name='Invoices')
+        logger.debug(f"Loaded {len(invoices_df)} invoice records from Invoices sheet")
 
-        # Ensure the file exists
-        if not os.path.exists(combined_file):
-            raise FileNotFoundError(f"Combined data file not found in {output_dir}")
+        # Convert GP column from currency string to float
+        def parse_currency(value):
+            if pd.isna(value):
+                return 0.0
+            if isinstance(value, (int, float)):
+                return float(value)
+            try:
+                cleaned = str(value).replace('$', '').replace(',', '').strip()
+                return float(cleaned) if cleaned else 0.0
+            except (ValueError, TypeError):
+                return 0.0
 
-        # Read the Invoices sheet
-        invoices_df = pd.read_excel(combined_file, sheet_name='Invoices')
-        logger.debug(f"Loaded {len(invoices_df)} records from Invoices sheet")
+        # Convert GP and other currency columns
+        currency_columns = ['GP', 'Total', 'Cost', 'Subtotal']
+        for col in currency_columns:
+            if col in invoices_df.columns:
+                invoices_df[col] = invoices_df[col].apply(parse_currency)
+        
+        # Filter tech_data to only include installers
+        install_techs = tech_data[
+            (~tech_data['Name'].isin(EXCLUDED_TECHS)) &
+            (tech_data['Technician Business Unit'].apply(
+                lambda x: determine_tech_type(x) == 'INSTALL'
+            ))
+        ]
+        
+        logger.info(f"Processing GP for {len(install_techs)} installers")
 
-        # Merge with tech data to get Payroll ID
+        # Merge installer data with invoices
         merged_df = invoices_df.merge(
-            tech_data[['Name', 'Payroll ID']],
+            install_techs[['Name', 'Badge ID', 'Technician Business Unit']],
             left_on='Technician',
             right_on='Name',
-            how='left'
+            how='inner'
         )
+        
+        logger.debug(f"Found {len(merged_df)} invoice records for installers")
 
-        if 'Payroll ID' not in merged_df.columns:
-            logger.error("Missing 'Payroll ID' after merging with tech data")
-            raise KeyError("Payroll ID")
-
-        # Group GP values by Technician, Business Unit, and Payroll ID
-        grouped = merged_df.groupby(['Technician', 'Business Unit', 'Payroll ID'])['GP'].sum().reset_index()
+        # Group GP values and filter out zeros and nulls
+        grouped = merged_df.groupby(['Name', 'Business Unit', 'Badge ID'])['GP'].sum().reset_index()
+        grouped = grouped[
+            (grouped['GP'] != 0) & 
+            (grouped['GP'].notna()) & 
+            (grouped['GP'] > 0)
+        ]
+        
+        logger.debug(f"Found {len(grouped)} valid GP entries after grouping")
 
         for _, row in grouped.iterrows():
-            technician = row['Technician']
-            business_unit = row['Business Unit']
-            badge_id = row['Payroll ID']
-            if pd.notna(badge_id) and not str(badge_id).startswith('J6P'):
-                badge_id = f"J6P{badge_id}"
-            total_gp = row['GP']
-
-            if total_gp == 0:
-                logger.debug(f"Skipping entry for {technician} (GP: {total_gp:.2f})")
+            if pd.isna(row['Badge ID']) or pd.isna(row['Business Unit']):
+                logger.warning(f"Skipping entry for {row['Name']} due to missing Badge ID or Business Unit")
                 continue
 
-            subdepartment_code = business_unit.split()[-1] if isinstance(business_unit, str) else None
-            dept_code = DEPARTMENT_CODES.get(subdepartment_code, {}).get('code')
+            try:
+                # Extract department code from business unit
+                business_unit = str(row['Business Unit']).upper()
+                dept_codes = re.findall(r'\d{2}', business_unit)
+                if not dept_codes:
+                    logger.warning(f"Could not find department code in business unit: {business_unit}")
+                    continue
+                
+                subdepartment_code = dept_codes[0]
+                dept_code = DEPARTMENT_CODES.get(subdepartment_code, {}).get('code')
+                
+                if not dept_code:
+                    logger.warning(f"Invalid department code {subdepartment_code} found in: {business_unit}")
+                    continue
 
-            if not dept_code:
-                logger.warning(f"Could not determine department code for business unit: {business_unit}")
+                gp_value = float(row['GP'])
+                if gp_value <= 0:
+                    logger.debug(f"Skipping non-positive GP value for {row['Name']}: ${gp_value}")
+                    continue
+
+                # Create payroll entry with standardized ICM code for installers
+                entry = PayrollEntry(
+                    company_code=COMPANY_CODE,
+                    badge_id=row['Badge ID'],
+                    date=target_date,
+                    amount=gp_value,
+                    pay_code='ICM',  # Standardized to ICM for all installer entries
+                    dept=dept_code,
+                    location_id=LOCATION_ID
+                )
+                payroll_entries.append(entry)
+                logger.info(f"Created GP entry for installer {row['Name']}: ${gp_value:,.2f} in dept {dept_code}")
+
+            except Exception as e:
+                logger.error(f"Error processing GP entry for {row['Name']}: {str(e)}")
                 continue
 
-            entry = PayrollEntry(
-                company_code=COMPANY_CODE,
-                badge_id=badge_id if pd.notna(badge_id) else "UNKNOWN",
-                date=target_date,
-                amount=total_gp,
-                pay_code='IC',
-                dept=dept_code,
-                location_id=LOCATION_ID
-            )
-            payroll_entries.append(entry)
-            logger.debug(
-                f"Created GP payroll entry for {technician} - "
-                f"Business Unit: {business_unit}, Dept: {dept_code}, "
-                f"Total GP: ${total_gp:.2f}"
-            )
-
-        logger.info(f"Generated {len(payroll_entries)} GP payroll entries")
+        logger.info(f"Successfully processed {len(payroll_entries)} GP entries for installers")
         return payroll_entries
 
     except Exception as e:
-        logger.error(f"Error processing GP entries: {str(e)}")
+        logger.error(f"Error processing installer GP entries: {str(e)}")
         raise
 
-
-def process_adjustments(combined_file: str, logger: logging.Logger) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Process adjustments data and split into positive and negative adjustments."""
-    logger.info("Processing adjustments data...")
+def match_department_spiffs(adj_df: pd.DataFrame, logger: logging.Logger) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Match positive and negative spiffs within the same department and separate TGLs."""
+    logger.info("Processing and matching department spiffs...")
+    
+    # Filter out excluded techs at the start
+    adj_df = adj_df[~adj_df['Technician'].isin(EXCLUDED_TECHS)]
+    
+    tgl_entries = []
+    matched_spiffs = []
+    unmatched_negatives = []
     
     try:
-        adj_df = pd.read_excel(combined_file, sheet_name='Direct Payroll Adjustments')
-        logger.debug(f"Successfully loaded {len(adj_df)} adjustment records")
-        
-        positive_adj = []
-        negative_adj = []
-        
+        # First, separate entries into TGLs, positive spiffs, and negative spiffs
         for _, row in adj_df.iterrows():
             try:
                 amount = float(str(row['Amount']).replace('$', '').replace(',', ''))
                 memo = str(row['Memo']).strip()
+                tech = str(row['Technician']).strip()
                 
+                # Extract department code
                 dept_code = memo[:2] if memo[:2].isdigit() else '00'
                 dept_desc = DEPARTMENT_CODES.get(dept_code, {'desc': 'Unknown'})['desc']
                 dept_combined = f"{dept_code} - {dept_desc}"
                 
-                adj_record = {
-                    'Technician': row['Technician'],
+                entry = {
+                    'Technician': tech,
                     'Department': dept_combined,
                     'Memo': memo,
-                    'Type': 'TGL' if 'tgl' in memo.lower() else 'Spiff'
+                    'Amount': amount,
+                    'DeptCode': dept_code  # Add raw department code for matching
                 }
                 
+                # Separate TGLs
+                if 'tgl' in memo.lower():
+                    entry['Type'] = 'TGL'
+                    tgl_entries.append(entry)
+                    continue
+                
+                # Separate positive and negative spiffs
                 if amount >= 0:
-                    adj_record['Amount'] = amount
-                    positive_adj.append(adj_record)
+                    matched_spiffs.append(entry)
                 else:
-                    adj_record['Amount'] = amount
-                    negative_adj.append(adj_record)
-                    logger.debug(f"Negative adjustment found: {adj_record}")
+                    # Remove Type field for negative entries
+                    del entry['DeptCode']  # Remove the matching code as it's no longer needed
+                    unmatched_negatives.append(entry)
                     
             except ValueError as e:
                 logger.warning(f"Error processing adjustment record: {str(e)}")
                 continue
         
-        pos_df = pd.DataFrame(positive_adj)
-        neg_df = pd.DataFrame(negative_adj)
+        # Convert to DataFrames for easier processing
+        pos_df = pd.DataFrame(matched_spiffs)
+        neg_df = pd.DataFrame(unmatched_negatives)
+        tgl_df = pd.DataFrame(tgl_entries)
         
-        logger.info(f"Processed {len(pos_df)} positive and {len(neg_df)} negative adjustments")
-        return pos_df, neg_df
+        # If there are both positive and negative spiffs to match
+        if not pos_df.empty and not neg_df.empty:
+            # Group by technician and department
+            pos_grouped = pos_df.groupby(['Technician', 'DeptCode'])
+            neg_grouped = neg_df.groupby(['Technician', 'Department'])
+            
+            final_matched = []
+            remaining_negatives = []
+            
+            # For each negative spiff
+            for (tech, dept), neg_group in neg_grouped:
+                neg_total = neg_group['Amount'].sum()
+                dept_code = dept.split(' - ')[0]  # Extract department code from combined string
+                
+                # Look for matching positive spiffs
+                try:
+                    pos_group = pos_grouped.get_group((tech, dept_code))
+                    pos_total = pos_group['Amount'].sum()
+                    
+                    # If we can fully offset the negative
+                    if pos_total >= abs(neg_total):
+                        # Add matched pair to final matches
+                        matched_entry = {
+                            'Technician': tech,
+                            'Department': dept,
+                            'Original Positive': pos_total,
+                            'Negative Amount': neg_total,
+                            'Net Amount': pos_total + neg_total,
+                            'Status': 'Fully Matched'
+                        }
+                        final_matched.append(matched_entry)
+                        
+                    else:
+                        # Partial match
+                        matched_entry = {
+                            'Technician': tech,
+                            'Department': dept,
+                            'Original Positive': pos_total,
+                            'Negative Amount': neg_total,
+                            'Net Amount': pos_total + neg_total,
+                            'Status': 'Partially Matched'
+                        }
+                        final_matched.append(matched_entry)
+                        
+                        # Add remaining negative to unmatched
+                        remaining_amount = pos_total + neg_total
+                        if remaining_amount < 0:
+                            for _, neg_row in neg_group.iterrows():
+                                remaining_negatives.append({
+                                    'Technician': tech,
+                                    'Department': dept,
+                                    'Memo': neg_row['Memo'],
+                                    'Amount': remaining_amount
+                                })
+                                
+                except KeyError:
+                    # No matching positive spiffs found
+                    for _, neg_row in neg_group.iterrows():
+                        remaining_negatives.append({
+                            'Technician': tech,
+                            'Department': dept,
+                            'Memo': neg_row['Memo'],
+                            'Amount': neg_row['Amount']
+                        })
+            
+            matched_df = pd.DataFrame(final_matched)
+            remaining_neg_df = pd.DataFrame(remaining_negatives)
+            
+        else:
+            matched_df = pd.DataFrame()
+            remaining_neg_df = neg_df
+        
+        logger.info(f"Processed {len(tgl_df)} TGL entries")
+        logger.info(f"Found {len(matched_df)} matched spiff pairs")
+        logger.info(f"Found {len(remaining_neg_df)} unmatched negative spiffs")
+        
+        return tgl_df, matched_df, remaining_neg_df
+        
+    except Exception as e:
+        logger.error(f"Error matching department spiffs: {str(e)}")
+        raise
+
+def process_adjustments(combined_file: str, logger: logging.Logger) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Process adjustments data and split into TGLs, matched spiffs, and unmatched negatives."""
+    logger.info("Processing adjustments data...")
+    
+    try:
+        # Read adjustments data
+        adj_df = pd.read_excel(combined_file, sheet_name='Direct Payroll Adjustments')
+        tech_data = pd.read_excel(combined_file, sheet_name='Sheet1_Tech')
+        
+        logger.debug(f"Successfully loaded {len(adj_df)} adjustment records")
+        
+        # Verify columns exist
+        required_columns = ['Technician', 'Amount', 'Memo']
+        missing_columns = [col for col in required_columns if col not in adj_df.columns]
+        if missing_columns:
+            raise ValueError(f"Missing required columns in adjustments data: {missing_columns}")
+        
+        # Filter out null technicians and totals rows
+        adj_df = adj_df[
+            (adj_df['Technician'].notna()) &
+            (~adj_df['Technician'].astype(str).str.contains('Totals', na=False))
+        ]
+        
+        # Filter out excluded techs
+        adj_df = adj_df[~adj_df['Technician'].isin(EXCLUDED_TECHS)]
+        
+        # Process and match spiffs
+        tgl_df, matched_df, remaining_neg_df = match_department_spiffs(adj_df, logger)
+        
+        # Process positive spiffs
+        pos_spiffs = []
+        for _, row in adj_df.iterrows():
+            try:
+                if pd.isna(row['Amount']) or pd.isna(row['Memo']):
+                    continue
+                    
+                amount = float(str(row['Amount']).replace('$', '').replace(',', ''))
+                memo = str(row['Memo']).strip()
+                tech = str(row['Technician']).strip()
+                
+                # Skip if it's a TGL
+                if 'tgl' in memo.lower():
+                    continue
+                    
+                # Only process positive spiffs
+                if amount > 0:
+                    dept_code = memo[:2] if memo[:2].isdigit() else '00'
+                    dept_desc = DEPARTMENT_CODES.get(dept_code, {'desc': 'Unknown'})['desc']
+                    dept_combined = f"{dept_code} - {dept_desc}"
+                    
+                    # Check if this spiff was used in matching
+                    if matched_df.empty or not ((matched_df['Technician'] == tech) & 
+                                             (matched_df['Department'].str.startswith(dept_code))).any():
+                        pos_spiffs.append({
+                            'Technician': tech,
+                            'Department': dept_combined,
+                            'Memo': memo,
+                            'Amount': amount
+                        })
+                        
+            except Exception as e:
+                logger.warning(f"Error processing positive spiff record: {str(e)}")
+                continue
+        
+        pos_df = pd.DataFrame(pos_spiffs)
+        
+        logger.info(f"Successfully processed adjustments data:")
+        logger.info(f"TGL entries: {len(tgl_df)}")
+        logger.info(f"Matched spiffs: {len(matched_df)}")
+        logger.info(f"Positive spiffs: {len(pos_df)}")
+        logger.info(f"Negative spiffs: {len(remaining_neg_df)}")
+        
+        return tgl_df, matched_df, pos_df, remaining_neg_df
         
     except Exception as e:
         logger.error(f"Error processing adjustments: {str(e)}")
         raise
 
+
 def save_payroll_file(entries: List[PayrollEntry], output_file: str, logger: logging.Logger):
-    """Save payroll entries to Excel file with specific formatting."""
+    """Save payroll entries to Excel file with specific formatting and validation."""
     try:
+        # Convert entries to DataFrame
         df = pd.DataFrame([{
             'Company Code': entry.company_code,
             'Badge ID': entry.badge_id,
@@ -1499,10 +1758,43 @@ def save_payroll_file(entries: List[PayrollEntry], output_file: str, logger: log
             'Location ID': entry.location_id
         } for entry in entries])
         
+        # Group entries by Badge ID and Pay Code to check for duplicates
+        duplicate_check = df.groupby(['Badge ID', 'Dept'])['Amount'].sum().reset_index()
+        if len(duplicate_check) != len(df):
+            logger.warning("Found multiple entries for same Badge ID and Department. Consolidating...")
+            df = duplicate_check
+        
+        # Sort entries by Badge ID and Pay Code
+        df = df.sort_values(['Badge ID', 'Pay Code'])
+        
+        # Validate entries
+        for idx, row in df.iterrows():
+            try:
+                # Ensure amount is positive
+                if row['Amount'] <= 0:
+                    logger.warning(f"Invalid amount ${row['Amount']} for Badge ID {row['Badge ID']}")
+                    continue
+                    
+                # Validate Pay Code
+                if row['Pay Code'] not in ['PC', 'IC', 'SP']:
+                    logger.warning(f"Invalid Pay Code {row['Pay Code']} for Badge ID {row['Badge ID']}")
+                    continue
+                    
+                # Validate Department code
+                if str(row['Dept']) not in [dept['code'] for dept in DEPARTMENT_CODES.values()]:
+                    logger.warning(f"Invalid Department code {row['Dept']} for Badge ID {row['Badge ID']}")
+                    continue
+                
+            except Exception as e:
+                logger.error(f"Error validating row {idx}: {str(e)}")
+                continue
+        
+        # Write to Excel with formatting
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             df.to_excel(writer, index=False)
             worksheet = writer.sheets['Sheet1']
             
+            # Format columns
             for idx, col in enumerate(df.columns):
                 max_length = max(
                     df[col].astype(str).apply(len).max(),
@@ -1515,31 +1807,219 @@ def save_payroll_file(entries: List[PayrollEntry], output_file: str, logger: log
                 header_cell = worksheet[f"{col_letter}1"]
                 header_cell.font = Font(bold=True)
                 
+                # Special formatting for Amount column
                 if col == 'Amount':
                     for cell in worksheet[col_letter]:
                         cell.alignment = Alignment(horizontal='right')
-                        if cell.row > 1:
+                        if cell.row > 1:  # Skip header
                             cell.number_format = '#,##0.00'
+                
+                # Center align other columns
+                else:
+                    for cell in worksheet[col_letter]:
+                        cell.alignment = Alignment(horizontal='center')
         
-        logger.info(f"Successfully saved payroll file: {output_file}")
+        logger.info(f"Successfully saved {len(df)} payroll entries to {output_file}")
+        logger.debug("Entry breakdown:")
+        logger.debug(f"PC (Service Tech Commission): {len(df[df['Pay Code'] == 'PC'])}")
+        logger.debug(f"IC (Installer GP): {len(df[df['Pay Code'] == 'IC'])}")
+        logger.debug(f"SP (Spiffs): {len(df[df['Pay Code'] == 'SP'])}")
         
     except Exception as e:
         logger.error(f"Error saving payroll file: {str(e)}")
         raise
 
-def save_adjustments_files(pos_adj: pd.DataFrame, neg_adj: pd.DataFrame, 
-                          pos_file: str, neg_file: str, logger: logging.Logger):
-    """Save adjustment analysis files with autofit columns."""
+def save_adjustment_files(tgl_df: pd.DataFrame, matched_df: pd.DataFrame, 
+                         pos_df: pd.DataFrame, neg_df: pd.DataFrame,
+                         matched_file: str, pos_file: str, 
+                         neg_file: str, tech_data: pd.DataFrame, logger: logging.Logger):
+    """Save all adjustment analysis files with autofit columns."""
     try:
+        # Convert TGLs into spiff format
+        payroll_entries = []
+
+        # Process TGLs
+        for _, row in tgl_df.iterrows():
+            if pd.isna(row['Amount']):
+                continue
+                
+            tech_name = row['Technician']
+            if tech_name in EXCLUDED_TECHS:
+                logger.debug(f"Skipping TGL entry for excluded tech {tech_name}")
+                continue
+
+            # Fix 1: Safer tech data lookup
+            matching_techs = tech_data[tech_data['Name'] == tech_name]
+            if matching_techs.empty:
+                logger.warning(f"No badge ID found for technician: {tech_name}")
+                continue
+            
+            badge_id = matching_techs.iloc[0]['Badge ID']
+            if pd.isna(badge_id):
+                logger.debug(f"Skipping TGL entry for {tech_name} - No badge ID found")
+                continue
+            
+            dept_code = row['Department'].split(' - ')[0].strip()
+            dept_full_code = DEPARTMENT_CODES.get(dept_code, {'code': '0000000'})['code']
+            
+            try:
+                amount = abs(float(str(row['Amount']).replace('$', '').replace(',', '')))
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid amount format for TGL entry: {row['Amount']}")
+                continue
+                
+            payroll_entries.append({
+                'Company Code': COMPANY_CODE,
+                'Badge ID': badge_id,
+                'Date': datetime.now().strftime('%m/%d/%Y'),
+                'Amount': amount,
+                'Pay Code': 'SPF',
+                'Dept': dept_full_code,
+                'Location ID': LOCATION_ID
+            })
+
+        # Process matched spiffs
+        for _, row in matched_df.iterrows():
+            if row['Net Amount'] <= 0:
+                continue
+                
+            tech_name = row['Technician']
+            if tech_name in EXCLUDED_TECHS:
+                logger.debug(f"Skipping matched spiff for excluded tech {tech_name}")
+                continue
+
+            # Fix 2: Safer tech lookup for matched spiffs
+            matching_techs = tech_data[tech_data['Name'] == tech_name]
+            if matching_techs.empty:
+                logger.warning(f"No badge ID found for technician in matched spiffs: {tech_name}")
+                continue
+                
+            badge_id = matching_techs.iloc[0]['Badge ID']
+            if pd.isna(badge_id):
+                logger.debug(f"Skipping matched spiff for {tech_name} - No badge ID found")
+                continue
+            
+            dept_code = row['Department'].split(' - ')[0].strip()
+            dept_full_code = DEPARTMENT_CODES.get(dept_code, {'code': '0000000'})['code']
+            
+            payroll_entries.append({
+                'Company Code': COMPANY_CODE,
+                'Badge ID': badge_id,
+                'Date': datetime.now().strftime('%m/%d/%Y'),
+                'Amount': row['Net Amount'],
+                'Pay Code': 'SPF',
+                'Dept': dept_full_code,
+                'Location ID': LOCATION_ID
+            })
+
+        # Process positive spiffs
+        for _, row in pos_df.iterrows():
+            try:
+                tech_name = row['Technician']
+                if tech_name in EXCLUDED_TECHS:
+                    logger.debug(f"Skipping positive spiff for excluded tech {tech_name}")
+                    continue
+
+                # Fix 3: Safer tech lookup for positive spiffs
+                matching_techs = tech_data[tech_data['Name'] == tech_name]
+                if matching_techs.empty:
+                    logger.warning(f"No badge ID found for technician in positive spiffs: {tech_name}")
+                    continue
+                    
+                badge_id = matching_techs.iloc[0]['Badge ID']
+                if pd.isna(badge_id):
+                    logger.warning(f"Skipping positive spiff for {tech_name} - No badge ID found")
+                    continue
+
+                # Fix 4: Better department code handling
+                try:
+                    dept_code = row['Department'].split(' - ')[0].strip()
+                except (AttributeError, IndexError):
+                    logger.warning(f"Invalid department format for {tech_name}: {row.get('Department')}")
+                    continue
+                    
+                dept_full_code = DEPARTMENT_CODES.get(dept_code, {'code': '0000000'})['code']
+                
+                # Fix 5: Better amount parsing
+                try:
+                    amount = float(str(row['Amount']).replace('$', '').replace(',', ''))
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid amount format for {tech_name}: {row.get('Amount')}")
+                    continue
+                
+                if amount <= 0:
+                    logger.warning(f"Skipping invalid amount ${amount} for {tech_name}")
+                    continue
+
+                payroll_entries.append({
+                    'Company Code': COMPANY_CODE,
+                    'Badge ID': badge_id,
+                    'Date': datetime.now().strftime('%m/%d/%Y'),
+                    'Amount': amount,
+                    'Pay Code': 'SPF',
+                    'Dept': dept_full_code,
+                    'Location ID': LOCATION_ID
+                })
+                
+            except Exception as e:
+                logger.error(f"Error processing positive spiff for {tech_name}: {str(e)}")
+                continue
+
+        # Create DataFrame from all entries
+        consolidated_df = pd.DataFrame(payroll_entries)
+        
+        if not consolidated_df.empty:
+            # Group all entries by all fields except Amount and sum the amounts
+            consolidated_entries = consolidated_df.groupby([
+                'Company Code', 'Badge ID', 'Date', 'Pay Code', 'Dept', 'Location ID'
+            ], as_index=False)['Amount'].sum()
+            
+            # Sort by Badge ID
+            consolidated_entries = consolidated_entries.sort_values('Badge ID')
+            
+            with pd.ExcelWriter(matched_file, engine='openpyxl') as writer:
+                consolidated_entries.to_excel(writer, index=False)
+                worksheet = writer.sheets['Sheet1']
+                
+                # Format columns
+                for idx, col in enumerate(consolidated_entries.columns):
+                    max_length = max(
+                        consolidated_entries[col].astype(str).apply(len).max(),
+                        len(str(col))
+                    ) + 2
+                    
+                    col_letter = get_column_letter(idx + 1)
+                    worksheet.column_dimensions[col_letter].width = max_length
+                    
+                    header_cell = worksheet[f"{col_letter}1"]
+                    header_cell.font = Font(bold=True)
+                    
+                    if col == 'Amount':
+                        for cell in worksheet[col_letter]:
+                            cell.alignment = Alignment(horizontal='right')
+                            if cell.row > 1:
+                                cell.number_format = '#,##0.00'
+        else:
+            # Create empty file with correct columns
+            with pd.ExcelWriter(matched_file, engine='openpyxl') as writer:
+                pd.DataFrame(columns=[
+                    'Company Code', 'Badge ID', 'Date', 'Amount', 
+                    'Pay Code', 'Dept', 'Location ID'
+                ]).to_excel(writer, index=False)
+                autofit_columns(writer.sheets['Sheet1'])
+
+        # Save reference files
         with pd.ExcelWriter(pos_file, engine='openpyxl') as writer:
-            pos_adj.to_excel(writer, index=False)
+            pos_df.to_excel(writer, index=False)
             autofit_columns(writer.sheets['Sheet1'])
             
         with pd.ExcelWriter(neg_file, engine='openpyxl') as writer:
-            neg_adj.to_excel(writer, index=False)
+            neg_df.to_excel(writer, index=False)
             autofit_columns(writer.sheets['Sheet1'])
             
-        logger.info(f"Successfully saved adjustment files: {pos_file} and {neg_file}")
+        logger.info(f"Successfully saved consolidated spiffs file: {matched_file}")
+        logger.info(f"Successfully saved positive spiffs file: {pos_file}")
+        logger.info(f"Successfully saved negative spiffs file: {neg_file}")
         
     except Exception as e:
         logger.error(f"Error saving adjustment files: {str(e)}")
@@ -1604,72 +2084,95 @@ def find_latest_files(directory):
         'tgl': tgl_file
     }
 
+NAME_COLUMNS_MAP = {
+    '2024': ['Technician Name'],
+    'Sheet1_TGL': ['Lead Generated By'],
+    'Invoices': ['Technician'],
+    'Direct Payroll Adjustments': ['Technician'],
+    'Sheet1': ['Sold By', 'Primary Technician'],
+    'Sheet1_Tech': ['Name']
+}
+
 def combine_workbooks(directory, output_file, files):
     """Combine all workbooks into a single file using the pre-selected files."""
+    def clean_name_column(worksheet, col_idx):
+        """Helper function to clean names in a specific column."""
+        for row in worksheet.iter_rows(min_row=2):  # Skip header
+            cell = row[col_idx-1]  # Convert to 0-based index
+            if cell.value and isinstance(cell.value, str):
+                original = cell.value
+                cleaned = original.strip()
+                if original != cleaned:
+                    print(f"Cleaned name: '{original}' -> '{cleaned}'")
+                cell.value = cleaned
+
     # Copy the UUID file as the base
     shutil.copy2(files['uuid'], output_file)
-
     target_wb = load_workbook(filename=output_file)
 
-    # AutoFit UUID file sheets
-    for sheet in target_wb.sheetnames:
-        autofit_columns(target_wb[sheet])
+    # Process the UUID file sheets first
+    for sheet_name in target_wb.sheetnames:
+        sheet = target_wb[sheet_name]
+        header_row = next(sheet.rows)
+        
+        # Find Technician columns
+        for idx, cell in enumerate(header_row, 1):
+            if cell.value == 'Technician':
+                clean_name_column(sheet, idx)
+        autofit_columns(sheet)
 
-    # Copy from Jobs Report
-    source_wb = load_workbook(filename=files['jobs'], data_only=True)
-    source_ws = source_wb['Sheet1']
-    if 'Sheet1' in target_wb.sheetnames:
-        target_wb.remove(target_wb['Sheet1'])
-    target_wb.create_sheet('Sheet1')
-    target_ws = target_wb['Sheet1']
+    # Process other workbooks
+    source_configs = [
+        {
+            'file': files['jobs'],
+            'source_sheet': 'Sheet1',
+            'target_sheet': 'Sheet1',
+            'name_cols': ['Sold By', 'Primary Technician', 'Technician']
+        },
+        {
+            'file': files['tech'],
+            'source_sheet': 'Sheet1',
+            'target_sheet': 'Sheet1_Tech',
+            'name_cols': ['Name']
+        }
+    ]
 
-    for row in source_ws:
-        for cell in row:
-            new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
-            # If the cell's value is a datetime, set a date-only format
-            if isinstance(cell.value, datetime):
-                new_cell.number_format = 'mm/dd/yyyy'
-    autofit_columns(target_ws)
+    if files.get('tgl'):
+        source_configs.append({
+            'file': files['tgl'],
+            'source_sheet': 'Sheet1',
+            'target_sheet': 'Sheet1_TGL',
+            'name_cols': ['Lead Generated By']
+        })
 
-    # Copy from Tech Department
-    source_wb = load_workbook(filename=files['tech'], data_only=True)
-    source_ws = source_wb['Sheet1']
-    target_wb.create_sheet('Sheet1_Tech')
-    target_ws = target_wb['Sheet1_Tech']
-    for row in source_ws:
-        for cell in row:
-            new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
-            if isinstance(cell.value, datetime):
-                new_cell.number_format = 'mm/dd/yyyy'
-    autofit_columns(target_ws)
+    for config in source_configs:
+        source_wb = load_workbook(filename=config['file'], data_only=True)
+        source_ws = source_wb[config['source_sheet']]
 
-    # Copy from Time Off
-    source_wb = load_workbook(filename=files['time_off'], data_only=True)
-    source_ws = source_wb['2024']
-    if '2024' in target_wb.sheetnames:
-        target_wb.remove(target_wb['2024'])
-    target_wb.create_sheet('2024')
-    target_ws = target_wb['2024']
-    for row in source_ws:
-        for cell in row:
-            new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
-            if isinstance(cell.value, datetime):
-                new_cell.number_format = 'mm/dd/yyyy'
-    autofit_columns(target_ws)
+        # Create or replace target sheet
+        if config['target_sheet'] in target_wb.sheetnames:
+            target_wb.remove(target_wb[config['target_sheet']])
+        target_ws = target_wb.create_sheet(config['target_sheet'])
 
-    # Copy from TGL file if exists
-    if 'tgl' in files and files['tgl']:
-        source_wb = load_workbook(filename=files['tgl'], data_only=True)
-        source_ws = source_wb['Sheet1']
-        if 'Sheet1_TGL' in target_wb.sheetnames:
-            target_wb.remove(target_wb['Sheet1_TGL'])
-        target_wb.create_sheet('Sheet1_TGL')
-        target_ws = target_wb['Sheet1_TGL']
-        for row in source_ws:
+        # Find columns that need cleaning
+        name_col_indices = []
+        header_row = next(source_ws.rows)
+        for idx, cell in enumerate(header_row, 1):
+            if cell.value in config['name_cols']:
+                name_col_indices.append(idx)
+
+        # Copy data and clean name columns
+        for row in source_ws.rows:
+            row_data = []
             for cell in row:
-                new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
-                if isinstance(cell.value, datetime):
-                    new_cell.number_format = 'mm/dd/yyyy'
+                value = cell.value
+                if cell.row > 1 and cell.column in name_col_indices and isinstance(value, str):
+                    original = value
+                    value = value.strip()
+                    if original != value:
+                        print(f"Cleaned name: '{original}' -> '{value}'")
+                target_ws.cell(row=cell.row, column=cell.column, value=value)
+
         autofit_columns(target_ws)
 
     target_wb.save(output_file)
@@ -1684,13 +2187,22 @@ def process_calculations(base_path: str, output_dir: str, logger: logging.Logger
 
         # Read necessary data
         data = pd.read_excel(combined_file, sheet_name='Sheet1')
-        
         tech_data = read_tech_department_data(combined_file, logger)
 
-        # Calculate commission results for the specified week
-        excused_hours_dict = get_excused_hours(combined_file, start_of_week)
+        # Filter tech_data to only include service technicians
+        service_tech_data = tech_data[
+            tech_data['Technician Business Unit'].apply(
+                lambda x: determine_tech_type(x) == 'SERVICE'
+            )
+        ]
+
+        # Use original time off file instead of combined file
+        time_off_file = os.path.join(base_path, "Approved_Time_Off 2023.xlsx")
+        excused_hours_dict = get_excused_hours(time_off_file, start_of_week)
+
+        # Calculate commission results for service technicians only
         results_df = process_commission_calculations(
-            data, tech_data, combined_file, start_of_week, excused_hours_dict
+            data, service_tech_data, combined_file, start_of_week, excused_hours_dict
         )
 
         # Save results to paystats file
@@ -1698,51 +2210,65 @@ def process_calculations(base_path: str, output_dir: str, logger: logging.Logger
             results_df.to_excel(writer, sheet_name='Technician Revenue Totals', index=False)
             autofit_columns(writer.sheets['Technician Revenue Totals'])
 
-        logger.info("Commission calculations completed")
+        logger.info("Commission calculations completed for service technicians")
 
     except Exception as e:
         logger.error(f"Error in calculations: {str(e)}")
         raise
 
-def process_payroll(base_path: str, output_dir: str, base_date: datetime, logger: logging.Logger):
-    """Process payroll and adjustments."""
+def process_payroll(base_path: str, output_dir: str, base_date: datetime, logger: logging.Logger, tech_data: pd.DataFrame):
+    """Process payroll and adjustments, separating service tech and installer processing."""
     try:
+        # Define file paths
         combined_file = os.path.join(output_dir, 'combined_data.xlsx')
         paystats_file = os.path.join(output_dir, 'paystats.xlsx')
         payroll_file = os.path.join(output_dir, 'payroll.xlsx')
-        adj_pos_file = os.path.join(output_dir, 'adjustments.xlsx')
-        adj_neg_file = os.path.join(output_dir, 'adjustments_negative.xlsx')
+        matched_file = os.path.join(output_dir, 'Spiffs.xlsx')
+        adj_pos_file = os.path.join(output_dir, 'positive_adjustments.xlsx')
+        adj_neg_file = os.path.join(output_dir, 'negative_adjustments.xlsx')
         
         # Format target date
         target_date = base_date.strftime('%m/%d/%Y')
         
-        # Process technician department data
-        tech_data = read_tech_department_data(combined_file, logger)
+        # Split technicians by type
+        service_techs = tech_data[tech_data['Technician Business Unit'].apply(
+            lambda x: determine_tech_type(x) == 'SERVICE'
+        )]
+        install_techs = tech_data[tech_data['Technician Business Unit'].apply(
+            lambda x: determine_tech_type(x) == 'INSTALL'
+        )]
         
-        # Generate payroll entries from paystats
-        payroll_entries = process_paystats(output_dir, paystats_file, tech_data, target_date, logger)
+        logger.info(f"Processing {len(service_techs)} service technicians and {len(install_techs)} installers")
         
-        # Generate payroll entries from GP
-        gp_entries = process_gp_entries(output_dir, tech_data, target_date, logger)
+        # Process service technician commissions
+        payroll_entries = process_paystats(output_dir, paystats_file, service_techs, target_date, logger)
         
-        # Combine all payroll entries
+        # Process installer GP entries separately
+        gp_entries = process_gp_entries(output_dir, install_techs, target_date, logger)
+        
+        # Combine payroll entries
         all_payroll_entries = payroll_entries + gp_entries
         
-        # Process adjustments
-        pos_adj, neg_adj = process_adjustments(combined_file, logger)
+        # Process adjustments (TGLs and spiffs) for both service techs and installers
+        eligible_techs = pd.concat([service_techs, install_techs])
+        tgl_df, matched_df, pos_df, neg_df = process_adjustments(combined_file, logger, eligible_techs)
         
         # Save output files
         save_payroll_file(all_payroll_entries, payroll_file, logger)
-        save_adjustments_files(pos_adj, neg_adj, adj_pos_file, adj_neg_file, logger)
+        save_adjustment_files(tgl_df, matched_df, pos_df, neg_df, matched_file, 
+                            adj_pos_file, adj_neg_file, tech_data, logger)
         
         logger.info("Payroll processing completed successfully!")
+        logger.info(f"Service tech commission entries: {len(payroll_entries)}")
+        logger.info(f"Installer GP entries: {len(gp_entries)}")
+        logger.info(f"Total payroll entries: {len(all_payroll_entries)}")
         
     except Exception as e:
         logger.error(f"Error in payroll processing: {str(e)}")
         raise
 
 def main():
-    """Main program entry point."""
+    """Main program entry point with separated installer and service tech processing."""
     try:
         # Display welcome message and instructions
         print("\n" + "="*80)
@@ -1753,15 +2279,7 @@ def main():
         print("3. Tech Department file (format: Technician Department_Dated MM_DD_YY - MM_DD_YY.xlsx)")
         print("4. Time Off file (name: Approved_Time_Off 2023.xlsx)")
         print("5. TGL file (format: TGLs Set _Dated MM_DD_YY - MM_DD_YY.xlsx)")
-        print("\nThe program will:")
-        print("1. Validate that all required files exist with matching date ranges")
-        print("2. Combine all worksheets into 'combined_data.xlsx'")
-        print("3. Calculate commissions and create 'paystats.xlsx'")
-        print("4. Process payroll and create 'payroll.xlsx'")
-        print("5. Generate adjustment reports ('adjustments.xlsx' and 'adjustments_negative.xlsx')")
-        print("\nAll output files will be created in your Downloads folder.")
-        print("\n" + "="*80)
-    
+        
         while True:
             response = input("\nAre all required files ready in the Downloads folder? (Y/N): ").strip().upper()
             if response == 'Y':
@@ -1785,18 +2303,60 @@ def main():
         output_dir = create_output_directory(base_path, start_of_week, end_of_week, logger)
         combined_file = os.path.join(output_dir, 'combined_data.xlsx')
 
-        # Pass found_files directly
+        # Combine workbooks
         logger.info("Combining workbooks...")
         combine_workbooks(base_path, combined_file, found_files)
         logger.info("Workbook combination completed!")
 
-        logger.info("\nStarting calculations...")
+        # Read and categorize technicians
+        tech_data = read_tech_department_data(combined_file, logger)
+        service_techs = tech_data[tech_data['Technician Business Unit'].apply(
+            lambda x: determine_tech_type(x) == 'SERVICE'
+        )]
+        install_techs = tech_data[tech_data['Technician Business Unit'].apply(
+            lambda x: determine_tech_type(x) == 'INSTALL'
+        )]
+        
+        logger.info(f"\nFound {len(service_techs)} service technicians and {len(install_techs)} installers")
+        
+        # Process service technician calculations and paystats
+        logger.info("\nProcessing service technician calculations...")
         process_calculations(base_path, output_dir, logger, start_of_week, end_of_week)
 
+        # Process payroll with separated flows
         logger.info("\nStarting payroll processing...")
-        process_payroll(base_path, output_dir, base_date, logger)
+        logger.info("Processing service technician commission entries...")
+        payroll_entries = process_paystats(
+            output_dir, 
+            os.path.join(output_dir, 'paystats.xlsx'), 
+            tech_data,
+            base_date.strftime('%m/%d/%Y'), 
+            logger
+        )
+        
+        logger.info("Processing installer GP entries...")
+        gp_entries = process_gp_entries(output_dir, install_techs, base_date.strftime('%m/%d/%Y'), logger)
+        
+        # Process TGLs and spiffs for all eligible technicians
+        logger.info("Processing TGLs and spiffs for all eligible technicians...")
+        tgl_df, matched_df, pos_df, neg_df = process_adjustments(combined_file, logger)
+        
+        # Save final outputs
+        all_payroll_entries = payroll_entries + gp_entries
+        save_payroll_file(all_payroll_entries, os.path.join(output_dir, 'payroll.xlsx'), logger)
+        
+        save_adjustment_files(
+            tgl_df, matched_df, pos_df, neg_df,
+            os.path.join(output_dir, 'Spiffs.xlsx'),
+            os.path.join(output_dir, 'positive_adjustments.xlsx'),
+            os.path.join(output_dir, 'negative_adjustments.xlsx'),
+            tech_data, logger
+        )
 
         logger.info("\nAll processing completed successfully!")
+        logger.info(f"Service tech commission entries: {len(payroll_entries)}")
+        logger.info(f"Installer GP entries: {len(gp_entries)}")
+        logger.info(f"Total payroll entries: {len(all_payroll_entries)}")
 
     except Exception as e:
         logger.error(f"Fatal error in main process: {str(e)}")
