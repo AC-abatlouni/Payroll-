@@ -12,6 +12,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, Alignment
 from pathlib import Path
+from collections import defaultdict
 
 logger = logging.getLogger('commission_processor')
 
@@ -628,12 +629,22 @@ def get_valid_tgls(file_path: str, tech_name: str) -> List[dict]:
         return []
 
 def get_spiffs_total(file_path: str, tech_name: str) -> tuple[float, dict[str, float]]:
-    """Calculate total spiffs and department breakdown for a technician."""
+    """
+    Calculate total spiffs and department breakdown for a technician.
+    For Paystats purposes, only sums positive spiffs and ignores negatives.
+    
+    Args:
+        file_path (str): Path to the Excel file containing spiff data
+        tech_name (str): Name of the technician
+        
+    Returns:
+        tuple[float, dict[str, float]]: Total spiffs and department breakdown
+    """
     try:
         spiffs_df = pd.read_excel(file_path, sheet_name='Direct Payroll Adjustments')
         tech_spiffs = spiffs_df[spiffs_df['Technician'] == tech_name]
         
-        spiffs_total = 0
+        # Initialize department totals
         department_spiffs = {
             'HVAC': 0,
             'Plumbing': 0,
@@ -641,39 +652,60 @@ def get_spiffs_total(file_path: str, tech_name: str) -> tuple[float, dict[str, f
         }
         
         for idx, spiff in tech_spiffs.iterrows():
-            amount = float(str(spiff['Amount']).replace('$', '').replace(',', '').strip()) if pd.notnull(spiff['Amount']) else 0
-            memo = str(spiff['Memo']).strip() if pd.notnull(spiff['Memo']) else ''
-            
-            # Skip if memo contains 'commission' or 'tgl' in any case
-            if 'commission' in memo.lower() or 'tgl' in memo.lower():
-                logger.debug(f"Skipping entry: ${amount:,.2f} - Memo: {memo}")
+            try:
+                # Skip if amount is missing
+                if pd.isna(spiff['Amount']):
+                    continue
+                    
+                # Convert amount to float
+                amount = float(str(spiff['Amount']).replace('$', '').replace(',', '').strip())
+                
+                # Skip negative amounts and zero
+                if amount <= 0:
+                    continue
+                    
+                # Skip if memo is missing
+                if pd.isna(spiff['Memo']):
+                    continue
+                    
+                memo = str(spiff['Memo']).strip()
+                
+                # Skip TGLs and commission entries
+                if 'tgl' in memo.lower() or 'commission' in memo.lower():
+                    logger.debug(f"Skipping entry: ${amount:,.2f} - Memo: {memo}")
+                    continue
+                
+                # Skip if memo doesn't start with department number
+                if not memo[:2].isdigit():
+                    logger.warning(f"Invalid memo format - must start with department number. Row {idx + 2}: {memo}")
+                    continue
+                
+                # Get department number and validate
+                dept_num = int(memo[:2])
+                if not (20 <= dept_num <= 29 or 30 <= dept_num <= 39 or 40 <= dept_num <= 49):
+                    logger.warning(f"Invalid department number in memo (must be 20-29, 30-39, or 40-49). Row {idx + 2}: {memo}")
+                    continue
+                
+                # Add amount to appropriate department total
+                if 20 <= dept_num <= 29:
+                    department_spiffs['HVAC'] += amount
+                elif 30 <= dept_num <= 39:
+                    department_spiffs['Plumbing'] += amount
+                elif 40 <= dept_num <= 49:
+                    department_spiffs['Electric'] += amount
+                    
+                logger.debug(f"Added positive spiff: ${amount:,.2f} to dept {dept_num}")
+                
+            except ValueError as e:
+                logger.warning(f"Error processing spiff entry in row {idx + 2}: {str(e)}")
                 continue
-            
-            if not memo[:2].isdigit():
-                logger.error(f"Invalid memo format - must start with department number. Row {idx + 2}: {memo}")
-                raise ValueError(f"Invalid memo format - must start with department number. Row {idx + 2}: {memo}")
-            
-            dept_num = int(memo[:2])
-            if not (20 <= dept_num <= 29 or 30 <= dept_num <= 39 or 40 <= dept_num <= 49):
-                logger.error(f"Invalid department number in memo (must be 20-29, 30-39, or 40-49). Row {idx + 2}: {memo}")
-                raise ValueError(f"Invalid department number in memo (must be 20-29, 30-39, or 40-49). Row {idx + 2}: {memo}")
-            
-            memo_content = memo[2:].strip().lstrip('-').strip()
-            if not memo_content:
-                logger.warning(f"Warning: Memo contains no description after department number. Row {idx + 2}: {memo}")
-            
-            if 20 <= dept_num <= 29:
-                department_spiffs['HVAC'] += amount
-                logger.debug(f"Added HVAC spiff: ${amount:,.2f} - Memo: {memo}")
-            elif 30 <= dept_num <= 39:
-                department_spiffs['Plumbing'] += amount
-                logger.debug(f"Added Plumbing spiff: ${amount:,.2f} - Memo: {memo}")
-            elif 40 <= dept_num <= 49:
-                department_spiffs['Electric'] += amount
-                logger.debug(f"Added Electric spiff: ${amount:,.2f} - Memo: {memo}")
-            
-            spiffs_total += amount
         
+        spiffs_total = sum(department_spiffs.values())
+        logger.debug(f"Total positive spiffs for {tech_name}: ${spiffs_total:,.2f}")
+        logger.debug("Department breakdown:")
+        for dept, amount in department_spiffs.items():
+            logger.debug(f"  {dept}: ${amount:,.2f}")
+            
         return spiffs_total, department_spiffs
         
     except Exception as e:
@@ -1014,7 +1046,7 @@ def format_department_revenue(revenue_data: Dict[str, Dict[str, float]],
         sales = revenue_data['sales'][dept]
         combined = revenue_data['combined'][dept]
         dept_spiffs = department_spiffs[dept]
-        adjusted_combined = combined - dept_spiffs
+        adjusted_combined = max(0, combined - dept_spiffs)
         
         formatted[f"{dept} Revenue"] = f"${completed:,.2f}"
         formatted[f"{dept} Sales"] = f"${sales:,.2f}"
@@ -1529,138 +1561,92 @@ def process_gp_entries(output_dir: str, tech_data: pd.DataFrame, target_date: st
         raise
 
 def match_department_spiffs(adj_df: pd.DataFrame, logger: logging.Logger) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Match positive and negative spiffs within the same department and separate TGLs."""
+    """Match positive and negative spiffs within departments and track calculations."""
     logger.info("Processing and matching department spiffs...")
     
-    # Filter out excluded techs at the start
+    # Filter out excluded techs
     adj_df = adj_df[~adj_df['Technician'].isin(EXCLUDED_TECHS)]
     
     tgl_entries = []
-    matched_spiffs = []
+    matched_entries = []
     unmatched_negatives = []
     
     try:
-        # First, separate entries into TGLs, positive spiffs, and negative spiffs
-        for _, row in adj_df.iterrows():
-            try:
-                amount = float(str(row['Amount']).replace('$', '').replace(',', ''))
-                memo = str(row['Memo']).strip()
-                tech = str(row['Technician']).strip()
-                
-                # Extract department code
-                dept_code = memo[:2] if memo[:2].isdigit() else '00'
-                dept_desc = DEPARTMENT_CODES.get(dept_code, {'desc': 'Unknown'})['desc']
-                dept_combined = f"{dept_code} - {dept_desc}"
-                
-                entry = {
-                    'Technician': tech,
-                    'Department': dept_combined,
-                    'Memo': memo,
-                    'Amount': amount,
-                    'DeptCode': dept_code  # Add raw department code for matching
-                }
-                
-                # Separate TGLs
-                if 'tgl' in memo.lower():
-                    entry['Type'] = 'TGL'
-                    tgl_entries.append(entry)
-                    continue
-                
-                # Separate positive and negative spiffs
-                if amount >= 0:
-                    matched_spiffs.append(entry)
-                else:
-                    # Remove Type field for negative entries
-                    del entry['DeptCode']  # Remove the matching code as it's no longer needed
-                    unmatched_negatives.append(entry)
-                    
-            except ValueError as e:
-                logger.warning(f"Error processing adjustment record: {str(e)}")
-                continue
-        
-        # Convert to DataFrames for easier processing
-        pos_df = pd.DataFrame(matched_spiffs)
-        neg_df = pd.DataFrame(unmatched_negatives)
-        tgl_df = pd.DataFrame(tgl_entries)
-        
-        # If there are both positive and negative spiffs to match
-        if not pos_df.empty and not neg_df.empty:
-            # Group by technician and department
-            pos_grouped = pos_df.groupby(['Technician', 'DeptCode'])
-            neg_grouped = neg_df.groupby(['Technician', 'Department'])
+        # Group entries by technician and department
+        for tech_name, tech_group in adj_df.groupby('Technician'):
+            dept_entries = defaultdict(lambda: {'pos': [], 'neg': []})
             
-            final_matched = []
-            remaining_negatives = []
-            
-            # For each negative spiff
-            for (tech, dept), neg_group in neg_grouped:
-                neg_total = neg_group['Amount'].sum()
-                dept_code = dept.split(' - ')[0]  # Extract department code from combined string
-                
-                # Look for matching positive spiffs
+            # First pass - separate entries by department and type
+            for _, row in tech_group.iterrows():
                 try:
-                    pos_group = pos_grouped.get_group((tech, dept_code))
-                    pos_total = pos_group['Amount'].sum()
+                    amount = float(str(row['Amount']).replace('$', '').replace(',', ''))
+                    memo = str(row['Memo']).strip()
                     
-                    # If we can fully offset the negative
-                    if pos_total >= abs(neg_total):
-                        # Add matched pair to final matches
-                        matched_entry = {
-                            'Technician': tech,
-                            'Department': dept,
-                            'Original Positive': pos_total,
-                            'Negative Amount': neg_total,
-                            'Net Amount': pos_total + neg_total,
-                            'Status': 'Fully Matched'
-                        }
-                        final_matched.append(matched_entry)
-                        
-                    else:
-                        # Partial match
-                        matched_entry = {
-                            'Technician': tech,
-                            'Department': dept,
-                            'Original Positive': pos_total,
-                            'Negative Amount': neg_total,
-                            'Net Amount': pos_total + neg_total,
-                            'Status': 'Partially Matched'
-                        }
-                        final_matched.append(matched_entry)
-                        
-                        # Add remaining negative to unmatched
-                        remaining_amount = pos_total + neg_total
-                        if remaining_amount < 0:
-                            for _, neg_row in neg_group.iterrows():
-                                remaining_negatives.append({
-                                    'Technician': tech,
-                                    'Department': dept,
-                                    'Memo': neg_row['Memo'],
-                                    'Amount': remaining_amount
-                                })
-                                
-                except KeyError:
-                    # No matching positive spiffs found
-                    for _, neg_row in neg_group.iterrows():
-                        remaining_negatives.append({
-                            'Technician': tech,
-                            'Department': dept,
-                            'Memo': neg_row['Memo'],
-                            'Amount': neg_row['Amount']
+                    # Handle TGLs separately
+                    if 'tgl' in memo.lower():
+                        tgl_entries.append({
+                            'Technician': tech_name,
+                            'Department': memo[:2],
+                            'Memo': memo,
+                            'Amount': amount,
+                            'Type': 'TGL'
                         })
+                        continue
+                    
+                    # Extract department code
+                    dept_code = memo[:2]
+                    if not dept_code.isdigit():
+                        logger.warning(f"Invalid memo format for {tech_name}: {memo}")
+                        continue
+                        
+                    entry = {
+                        'amount': amount,
+                        'memo': memo,
+                        'original_amount': amount
+                    }
+                    
+                    if amount >= 0:
+                        dept_entries[dept_code]['pos'].append(entry)
+                    else:
+                        dept_entries[dept_code]['neg'].append(entry)
+                        
+                except ValueError as e:
+                    logger.warning(f"Error processing entry for {tech_name}: {str(e)}")
+                    continue
             
-            matched_df = pd.DataFrame(final_matched)
-            remaining_neg_df = pd.DataFrame(remaining_negatives)
-            
-        else:
-            matched_df = pd.DataFrame()
-            remaining_neg_df = neg_df
+            # Second pass - match and process entries by department
+            for dept_code, entries in dept_entries.items():
+                pos_total = sum(e['amount'] for e in entries['pos'])
+                neg_total = sum(e['amount'] for e in entries['neg'])
+                net_amount = pos_total + neg_total
+                
+                if net_amount > 0:
+                    # Create matched entry with calculation details
+                    matched_entries.append({
+                        'Technician': tech_name,
+                        'Department': f"{dept_code} - {DEPARTMENT_CODES.get(dept_code, {'desc': 'Unknown'})['desc']}",
+                        'Original Positive': pos_total,
+                        'Negative Amount': neg_total,
+                        'Net Amount': net_amount,
+                        'Calculation': f"Positive(${pos_total:,.2f}) + Negative(${neg_total:,.2f}) = ${net_amount:,.2f}",
+                        'Status': 'Fully Matched' if abs(neg_total) <= pos_total else 'Partially Matched'
+                    })
+                else:
+                    # Add remaining negative amount to unmatched with calculation
+                    unmatched_negatives.append({
+                        'Technician': tech_name,
+                        'Department': f"{dept_code} - {DEPARTMENT_CODES.get(dept_code, {'desc': 'Unknown'})['desc']}",
+                        'Original Positive': pos_total,
+                        'Negative Amount': neg_total,
+                        'Remaining Amount': net_amount,
+                        'Calculation': f"Positive(${pos_total:,.2f}) + Negative(${neg_total:,.2f}) = ${net_amount:,.2f}",
+                        'Status': 'No Positive Balance' if pos_total == 0 else 'Exceeds Positive Balance'
+                    })
         
-        logger.info(f"Processed {len(tgl_df)} TGL entries")
-        logger.info(f"Found {len(matched_df)} matched spiff pairs")
-        logger.info(f"Found {len(remaining_neg_df)} unmatched negative spiffs")
-        
-        return tgl_df, matched_df, remaining_neg_df
-        
+        return (pd.DataFrame(tgl_entries), 
+                pd.DataFrame(matched_entries), 
+                pd.DataFrame(unmatched_negatives))
+                
     except Exception as e:
         logger.error(f"Error matching department spiffs: {str(e)}")
         raise
