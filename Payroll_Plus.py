@@ -24,25 +24,25 @@ COMPANY_CODE = 'J6P'
 COLUMN_ORDER = [
     'Badge ID', 'Technician', 'Main Dept',
     # HVAC Department Subdepartments
-    '20 Revenue', '20 Sales', '20 Total',
-    '21 Revenue', '21 Sales', '21 Total',
-    '22 Revenue', '22 Sales', '22 Total',
-    '24 Revenue', '24 Sales', '24 Total',
-    '25 Revenue', '25 Sales', '25 Total',
-    '27 Revenue', '27 Sales', '27 Total',
+    '20 Revenue', '20 Sales', '20 Spiffs', '20 Total', '20 Commission',
+    '21 Revenue', '21 Sales', '21 Spiffs', '21 Total', '21 Commission',
+    '22 Revenue', '22 Sales', '22 Spiffs', '22 Total', '22 Commission',
+    '24 Revenue', '24 Sales', '24 Spiffs', '24 Total', '24 Commission',
+    '25 Revenue', '25 Sales', '25 Spiffs', '25 Total', '25 Commission',
+    '27 Revenue', '27 Sales', '27 Spiffs', '27 Total', '27 Commission',
     # HVAC Department Totals
     'HVAC Revenue', 'HVAC Sales', 'HVAC Spiffs', 'HVAC Total', 'HVAC Commission',
     # Plumbing Department Subdepartments
-    '30 Revenue', '30 Sales', '30 Total',
-    '31 Revenue', '31 Sales', '31 Total',
-    '33 Revenue', '33 Sales', '33 Total',
-    '34 Revenue', '34 Sales', '34 Total',
+    '30 Revenue', '30 Sales', '30 Spiffs', '30 Total', '30 Commission',
+    '31 Revenue', '31 Sales', '31 Spiffs', '31 Total', '31 Commission',
+    '33 Revenue', '33 Sales', '33 Spiffs', '33 Total', '33 Commission',
+    '34 Revenue', '34 Sales', '34 Spiffs', '34 Total', '34 Commission',
     # Plumbing Department Totals
     'Plumbing Revenue', 'Plumbing Sales', 'Plumbing Spiffs', 'Plumbing Total', 'Plumbing Commission',
     # Electric Department Subdepartments
-    '40 Revenue', '40 Sales', '40 Total',
-    '41 Revenue', '41 Sales', '41 Total',
-    '42 Revenue', '42 Sales', '42 Total',
+    '40 Revenue', '40 Sales', '40 Spiffs', '40 Total', '40 Commission',
+    '41 Revenue', '41 Sales', '41 Spiffs', '41 Total', '41 Commission',
+    '42 Revenue', '42 Sales', '42 Spiffs', '42 Total', '42 Commission',
     # Electric Department Totals
     'Electric Revenue', 'Electric Sales', 'Electric Spiffs', 'Electric Total', 'Electric Commission',
     # Performance Metrics
@@ -628,6 +628,54 @@ def get_valid_tgls(file_path: str, tech_name: str) -> List[dict]:
         logger.error(f"Error processing TGL data for {tech_name}: {str(e)}")
         return []
 
+def get_subdepartment_spiffs(file_path: str, tech_name: str) -> dict[str, float]:
+    """
+    Get spiffs broken down by subdepartment for display purposes only.
+    This doesn't affect the original spiff calculations used for payroll.
+    """
+    try:
+        spiffs_df = pd.read_excel(file_path, sheet_name='Direct Payroll Adjustments')
+        tech_spiffs = spiffs_df[spiffs_df['Technician'] == tech_name]
+        
+        # Initialize subdepartment totals
+        subdepartment_spiffs = {
+            code: 0 for code in ['20', '21', '22', '24', '25', '27', 
+                               '30', '31', '33', '34', 
+                               '40', '41', '42']
+        }
+        
+        for _, spiff in tech_spiffs.iterrows():
+            try:
+                if pd.isna(spiff['Amount']) or pd.isna(spiff['Memo']):
+                    continue
+                    
+                amount = float(str(spiff['Amount']).replace('$', '').replace(',', '').strip())
+                if amount <= 0:
+                    continue
+                    
+                memo = str(spiff['Memo']).strip()
+                if 'tgl' in memo.lower() or 'commission' in memo.lower():
+                    continue
+                
+                # Extract subdepartment code
+                if not memo[:2].isdigit():
+                    continue
+                    
+                subdept = memo[:2]
+                if subdept in subdepartment_spiffs:
+                    subdepartment_spiffs[subdept] += amount
+                    
+            except ValueError:
+                continue
+        
+        return subdepartment_spiffs
+        
+    except Exception as e:
+        logger.error(f"Error getting subdepartment spiffs for {tech_name}: {str(e)}")
+        return {code: 0 for code in ['20', '21', '22', '24', '25', '27', 
+                                   '30', '31', '33', '34', 
+                                   '40', '41', '42']}
+
 def get_spiffs_total(file_path: str, tech_name: str) -> tuple[float, dict[str, float]]:
     """
     Calculate total spiffs and department breakdown for a technician.
@@ -1026,21 +1074,35 @@ def calculate_average_ticket_value(data: pd.DataFrame, tech_name: str, box_a: fl
 def format_department_revenue(revenue_data: Dict[str, Dict[str, float]], 
                             commission_rate: float,
                             department_spiffs: Dict[str, float],
-                            subdept_breakdown: Dict[str, Dict[str, float]]) -> Dict[str, str]:
+                            subdept_breakdown: Dict[str, Dict[str, float]],
+                            subdepartment_spiffs: Dict[str, float]) -> Dict[str, str]:
     """Format department and subdepartment revenue data into strings for Excel output."""
     formatted = {}
+    
+    # Helper function to convert string amounts to float
+    def parse_amount(amount_str: str) -> float:
+        try:
+            return float(amount_str.replace('$', '').replace(',', ''))
+        except (ValueError, AttributeError):
+            return 0.0
     
     # Format subdepartment totals
     for subdept_code in ['20', '21', '22', '24', '25', '27', '30', '31', '33', '34', '40', '41', '42']:
         completed = subdept_breakdown['completed'].get(subdept_code, 0)
         sales = subdept_breakdown['sales'].get(subdept_code, 0)
+        spiffs = subdepartment_spiffs.get(subdept_code, 0)
         total = subdept_breakdown['total'].get(subdept_code, 0)
         
         formatted[f"{subdept_code} Revenue"] = f"${completed:,.2f}"
         formatted[f"{subdept_code} Sales"] = f"${sales:,.2f}"
+        formatted[f"{subdept_code} Spiffs"] = f"${spiffs:,.2f}"
         formatted[f"{subdept_code} Total"] = f"${total:,.2f}"
+        
+        # Add calculation column showing commission result
+        calc_total = (completed + sales - spiffs) * commission_rate
+        formatted[f"{subdept_code} Commission"] = f"${calc_total:,.2f}"
     
-    # Format main department totals
+    # Format main department totals (unchanged from original)
     for dept in ['HVAC', 'Plumbing', 'Electric']:
         completed = revenue_data['completed'][dept]
         sales = revenue_data['sales'][dept]
@@ -1231,7 +1293,11 @@ def process_commission_calculations(data: pd.DataFrame, tech_data: pd.DataFrame,
         
         dept_revenue = calculate_department_revenue(data, tech_name, base_date)
         
+        # Get department spiffs (used for actual calculations)
         spiffs_total, department_spiffs = get_spiffs_total(file_path, tech_name)
+        
+        # Get subdepartment spiffs (for display only)
+        subdepartment_spiffs = get_subdepartment_spiffs(file_path, tech_name)
         
         valid_tgls = get_valid_tgls(file_path, tech_name)
         
@@ -1259,9 +1325,11 @@ def process_commission_calculations(data: pd.DataFrame, tech_data: pd.DataFrame,
             dept_revenue,
             commission_rate,
             department_spiffs,
-            subdept_breakdown
+            subdept_breakdown,
+            subdepartment_spiffs  # For display only
         )
         
+        # Calculate final commission using original logic (department level spiffs)
         commissionable_revenue = box_c - spiffs_total
         final_commission = commissionable_revenue * commission_rate
         
@@ -1287,6 +1355,7 @@ def process_commission_calculations(data: pd.DataFrame, tech_data: pd.DataFrame,
             'Status': f"Qualified for {commission_rate*100}% tier" if commission_rate > 0 else "Did not qualify"
         }
         
+        # Add formatted department data including display-only subdepartment spiffs
         result.update(formatted_dept_data)
         results.append(result)
 
@@ -1955,13 +2024,27 @@ def save_adjustment_files(tgl_df: pd.DataFrame, matched_df: pd.DataFrame,
         consolidated_df = pd.DataFrame(payroll_entries)
         
         if not consolidated_df.empty:
-            # Group all entries by all fields except Amount and sum the amounts
+            # Group by all fields except Amount and sum the amounts
             consolidated_entries = consolidated_df.groupby([
                 'Company Code', 'Badge ID', 'Date', 'Pay Code', 'Dept', 'Location ID'
-            ], as_index=False)['Amount'].sum()
+            ]).agg({
+                'Amount': 'sum'
+            }).reset_index()
             
-            # Sort by Badge ID
-            consolidated_entries = consolidated_entries.sort_values('Badge ID')
+            # Sort by Badge ID and Department
+            consolidated_entries = consolidated_entries.sort_values(['Badge ID', 'Dept'])
+            
+            # Reorder columns to match original order
+            column_order = [
+                'Company Code', 'Badge ID', 'Date', 'Amount', 
+                'Pay Code', 'Dept', 'Location ID'
+            ]
+            consolidated_entries = consolidated_entries[column_order]
+            
+            # Add debug logging to show consolidation
+            logger.debug("\nSpiff Consolidation Summary:")
+            for _, row in consolidated_entries.iterrows():
+                logger.debug(f"Badge ID: {row['Badge ID']}, Dept: {row['Dept']}, Total Amount: ${row['Amount']:,.2f}")
             
             with pd.ExcelWriter(matched_file, engine='openpyxl') as writer:
                 consolidated_entries.to_excel(writer, index=False)
