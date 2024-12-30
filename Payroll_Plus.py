@@ -2135,8 +2135,7 @@ def save_payroll_file(entries: List[PayrollEntry], output_file: str, logger: log
             except Exception as e:
                 logger.error(f"Error validating row {idx}: {str(e)}")
                 continue
-        df['Amount'] = df['Amount'].round(2)  # Round to 2 decimals
-        df['Amount'] = df['Amount'].apply(lambda x: '{:.2f}'.format(x))
+        
         # Write to Excel with formatting
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             df.to_excel(writer, index=False)
@@ -2160,7 +2159,6 @@ def save_payroll_file(entries: List[PayrollEntry], output_file: str, logger: log
                     for cell in worksheet[col_letter]:
                         cell.alignment = Alignment(horizontal='right')
                         if cell.row > 1:  # Skip header
-                            print(f"Amount before formatting: {cell.value}, Type: {type(cell.value)}")
                             cell.number_format = '#,##0.00'
                 
                 # Center align other columns
@@ -2363,10 +2361,7 @@ def save_adjustment_files(tgl_df: pd.DataFrame, matched_df: pd.DataFrame,
         
         # Convert payroll entries to DataFrame
         payroll_df = pd.DataFrame(payroll_entries)
-
-        payroll_df['Amount'] = payroll_df['Amount'].round(2)  # Round to 2 decimals
-        payroll_df['Amount'] = payroll_df['Amount'].apply(lambda x: '{:.2f}'.format(x))
-
+        
         # Save spiffs file
         if not payroll_df.empty:
             payroll_df = payroll_df.sort_values(['Badge ID', 'Dept'])
