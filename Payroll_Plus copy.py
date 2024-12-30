@@ -375,13 +375,12 @@ EXCLUDED_TECHS = [
 
 ]
 
-def format_badge_id(badge_id):
-    """Clean and return the payroll ID with THREE leading zeros."""
-    if pd.isna(badge_id):
+def format_badge_id(payroll_id: str) -> str:
+    """Clean and return the payroll ID."""
+    if pd.isna(payroll_id):
         return None
-    # Convert to string, remove any decimal points, and ensure THREE leading zeros
-    badge_str = str(badge_id).split('.')[0]
-    return badge_str.zfill(9)  # Changed from 8 to 9 to ensure THREE leading zeros
+    return str(payroll_id).strip()
+   
 
 def determine_tech_type(business_unit: str) -> str:
     """
@@ -476,22 +475,26 @@ def get_full_department_code(subdept_code: str) -> str:
 def get_tech_home_department(tech_business_unit: str) -> str:
     """
     Get a technician's home department code from their business unit.
-    E.g., "PLUMBING SERVICE 30" -> "3000000"
+    This is used for consolidating negative spiffs.
+    
+    Args:
+        tech_business_unit (str): Technician's business unit description
+        
+    Returns:
+        str: Seven-digit home department code (e.g., 2000000, 3000000, 4000000)
     """
     try:
-        # Extract numbers from the business unit
-        numbers = ''.join(filter(str.isdigit, str(tech_business_unit)))
-        if len(numbers) >= 2:
-            first_two = numbers[:2]
-            first_digit = first_two[0]
-            
-            # Map to 7-digit department code
-            if first_digit == '2':
-                return '2000000'  # HVAC
-            elif first_digit == '3':
-                return '3000000'  # Plumbing
-            elif first_digit == '4':
-                return '4000000'  # Electric
+        # Extract first two digits from business unit
+        unit_str = str(tech_business_unit).split('-')[0].strip()
+        first_digit = ''.join(filter(str.isdigit, unit_str))[0]
+        
+        # Map to main department code
+        if first_digit == '2':
+            return '2000000'  # HVAC
+        elif first_digit == '3':
+            return '3000000'  # Plumbing
+        elif first_digit == '4':
+            return '4000000'  # Electric
         return '0000000'
     except (IndexError, AttributeError):
         return '0000000'
@@ -821,6 +824,7 @@ def get_valid_tgls(file_path: str, tech_name: str) -> List[dict]:
 def get_subdepartment_spiffs(file_path: str, tech_name: str) -> dict[str, float]:
     """
     Get spiffs broken down by subdepartment for display purposes only.
+    This doesn't affect the original spiff calculations used for payroll.
     """
     try:
         spiffs_df = pd.read_excel(file_path, sheet_name='Direct Payroll Adjustments')
@@ -839,10 +843,12 @@ def get_subdepartment_spiffs(file_path: str, tech_name: str) -> dict[str, float]
                     continue
                     
                 amount = float(str(spiff['Amount']).replace('$', '').replace(',', '').strip())
-                if amount <= 0:  # Only filter out negative amounts
+                if amount <= 0:
                     continue
                     
                 memo = str(spiff['Memo']).strip()
+                if 'tgl' in memo.lower() or 'commission' in memo.lower():
+                    continue
                 
                 # Extract subdepartment code
                 if not memo[:2].isdigit():
@@ -864,10 +870,22 @@ def get_subdepartment_spiffs(file_path: str, tech_name: str) -> dict[str, float]
                                    '40', '41', '42']}
 
 def get_spiffs_total(file_path: str, tech_name: str) -> tuple[float, dict[str, float]]:
+    """
+    Calculate total spiffs and department breakdown for a technician.
+    For Paystats purposes, only sums positive spiffs and ignores negatives.
+    
+    Args:
+        file_path (str): Path to the Excel file containing spiff data
+        tech_name (str): Name of the technician
+        
+    Returns:
+        tuple[float, dict[str, float]]: Total spiffs and department breakdown
+    """
     try:
         spiffs_df = pd.read_excel(file_path, sheet_name='Direct Payroll Adjustments')
         tech_spiffs = spiffs_df[spiffs_df['Technician'] == tech_name]
         
+        # Initialize department totals
         department_spiffs = {
             'HVAC': 0,
             'Plumbing': 0,
@@ -892,6 +910,11 @@ def get_spiffs_total(file_path: str, tech_name: str) -> tuple[float, dict[str, f
                     continue
                     
                 memo = str(spiff['Memo']).strip()
+                
+                # Skip TGLs and commission entries
+                if 'tgl' in memo.lower() or 'commission' in memo.lower():
+                    logger.debug(f"Skipping entry: ${amount:,.2f} - Memo: {memo}")
+                    continue
                 
                 # Skip if memo doesn't start with department number
                 if not memo[:2].isdigit():
@@ -919,6 +942,11 @@ def get_spiffs_total(file_path: str, tech_name: str) -> tuple[float, dict[str, f
                 continue
         
         spiffs_total = sum(department_spiffs.values())
+        logger.debug(f"Total positive spiffs for {tech_name}: ${spiffs_total:,.2f}")
+        logger.debug("Department breakdown:")
+        for dept, amount in department_spiffs.items():
+            logger.debug(f"  {dept}: ${amount:,.2f}")
+            
         return spiffs_total, department_spiffs
         
     except Exception as e:
@@ -1599,10 +1627,8 @@ def sum_spiffs_for_dept(spiffs_df: pd.DataFrame, tech_name: str, dept_code: str)
     dept_spiffs = spiffs_df[
         (spiffs_df['Technician'] == tech_name) & 
         (spiffs_df['Memo'].apply(lambda x: extract_dept_code(str(x)) == dept_code)) &
-        (spiffs_df['Amount'].apply(
-            lambda x: float(str(x).replace('$', '').replace(',', '')) > 0 
-            if pd.notnull(x) else False
-        ))
+        (~spiffs_df['Memo'].str.lower().str.contains('tgl')) &
+        (~spiffs_df['Memo'].str.lower().str.contains('commission'))
     ]
     
     if dept_spiffs.empty:
@@ -1967,8 +1993,8 @@ def match_department_spiffs(adj_df: pd.DataFrame, logger: logging.Logger) -> Tup
 
 
 def process_adjustments(combined_file: str, logger: logging.Logger) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Process adjustments data."""
-    logger.info("Processing adjustments data...")
+    """Process adjustments data with updated spiff consolidation logic."""
+    logger.info("Processing adjustments data with new consolidation logic...")
     
     try:
         # Read adjustments and tech data
@@ -1981,19 +2007,16 @@ def process_adjustments(combined_file: str, logger: logging.Logger) -> Tuple[pd.
         # Create tech lookup dictionary with proper columns
         tech_lookup = {}
         for _, row in tech_data.iterrows():
+            # Handle both Badge ID and Payroll ID fields
             badge_id = None
             if 'Badge ID' in tech_data.columns:
                 badge_id = row['Badge ID'] if pd.notna(row['Badge ID']) else None
             if badge_id is None and 'Payroll ID' in tech_data.columns:
                 badge_id = row['Payroll ID'] if pd.notna(row['Payroll ID']) else None
             
-            # Get home department from Business Unit
-            home_dept = get_tech_home_department(row['Technician Business Unit'])
-            
             tech_lookup[row['Name']] = {
                 'Badge ID': badge_id if badge_id is not None else '',
-                'Technician Business Unit': row['Technician Business Unit'],
-                'Home Department': home_dept
+                'Technician Business Unit': row['Technician Business Unit']
             }
         
         # Filter data
@@ -2005,81 +2028,123 @@ def process_adjustments(combined_file: str, logger: logging.Logger) -> Tuple[pd.
         
         # Process TGLs
         tgl_entries = []
-        spiff_entries = []
-        
-        # First collect all negative spiffs by technician
-        tech_negatives = defaultdict(float)
-        
-        for _, row in adj_df.iterrows():
+        for _, row in adj_df[adj_df['Memo'].str.contains('tgl', case=False, na=False)].iterrows():
             try:
                 tech_name = row['Technician']
                 tech_info = tech_lookup.get(tech_name)
                 
                 if not tech_info:
-                    logger.debug(f"Skipping entry for tech not found in lookup: {tech_name}")
+                    logger.debug(f"Skipping TGL for tech not found in lookup: {tech_name}")
                     continue
                 
                 amount = float(str(row['Amount']).replace('$', '').replace(',', ''))
                 memo = str(row['Memo']).strip()
+                subdept_code = memo[:2] if memo[:2].isdigit() else '00'
                 
-                if 'tgl' in memo.lower():
-                    subdept_code = memo[:2] if memo[:2].isdigit() else '00'
-                    if subdept_code != '00':
-                        # For TGLs, use full department code from subdepartment
-                        dept_code = DEPARTMENT_CODES.get(subdept_code, {'code': '0000000'})['code']
-                        tgl_entries.append({
-                            'Technician': tech_name,
-                            'Badge ID': tech_info['Badge ID'],
-                            'Service Department': dept_code,
-                            'Amount': amount,
-                            'Memo': memo,
-                            'Type': 'TGL'
-                        })
-                else:
-                    if amount < 0:
-                        tech_negatives[tech_name] += amount
-                    else:
-                        subdept_code = memo[:2] if memo[:2].isdigit() else '00'
-                        if subdept_code != '00':
-                            # For spiffs, use full department code from subdepartment
-                            dept_code = DEPARTMENT_CODES.get(subdept_code, {'code': '0000000'})['code']
-                            spiff_entries.append({
-                                'Technician': tech_name,
-                                'Badge ID': tech_info['Badge ID'],
-                                'Service Department': dept_code,
-                                'Amount': amount,
-                                'Memo': memo,
-                                'Type': 'Positive'
-                            })
+                # Use service department code for TGL
+                main_dept_code = get_service_department_code(subdept_code)
+                
+                tgl_entries.append({
+                    'Technician': tech_name,
+                    'Badge ID': tech_info['Badge ID'],
+                    'Department': main_dept_code,
+                    'Original Department': subdept_code,
+                    'Amount': amount,
+                    'Memo': memo,
+                    'Type': 'TGL'
+                })
                 
             except Exception as e:
-                logger.warning(f"Error processing entry: {str(e)}")
+                logger.warning(f"Error processing TGL entry: {str(e)}")
                 continue
         
-        # Create negative entries
-        negative_entries = []
-        for tech_name, total_negative in tech_negatives.items():
-            tech_info = tech_lookup[tech_name]
-            negative_entries.append({
-                'Technician': tech_name,
-                'Badge ID': tech_info['Badge ID'],
-                'Service Department': tech_info['Home Department'],
-                'Amount': total_negative,
-                'Type': 'Consolidated Negative',
-                'Memo': f"Total negative spiffs to be subtracted from PCM"
-            })
+        # Process spiffs
+        spiff_entries = []
+        for _, row in adj_df[~adj_df['Memo'].str.contains('tgl', case=False, na=False)].iterrows():
+            try:
+                tech_name = row['Technician']
+                tech_info = tech_lookup.get(tech_name)
+                
+                if not tech_info:
+                    logger.debug(f"Skipping spiff for tech not found in lookup: {tech_name}")
+                    continue
+                    
+                amount = float(str(row['Amount']).replace('$', '').replace(',', ''))
+                memo = str(row['Memo']).strip()
+                
+                if 'commission' in memo.lower():
+                    continue
+                    
+                subdept_code = memo[:2] if memo[:2].isdigit() else '00'
+                if subdept_code == '00':
+                    continue
+                
+                spiff_entries.append({
+                    'Technician': tech_name,
+                    'Badge ID': tech_info['Badge ID'],
+                    'Home Department': get_tech_home_department(tech_info['Technician Business Unit']),
+                    'Service Department': get_service_department_code(subdept_code),
+                    'Original Department': subdept_code,
+                    'Amount': amount,
+                    'Memo': memo
+                })
+                
+            except Exception as e:
+                logger.warning(f"Error processing spiff entry: {str(e)}")
+                continue
         
         # Convert to DataFrames
         tgl_df = pd.DataFrame(tgl_entries)
         spiff_df = pd.DataFrame(spiff_entries)
+        
+        # Process positive and negative spiffs
+        negative_entries = []
+        positive_entries = []
+        
+        for tech_name, tech_group in spiff_df.groupby('Technician'):
+            try:
+                tech_home_dept = tech_group['Home Department'].iloc[0]
+                badge_id = tech_group['Badge ID'].iloc[0]
+                
+                # Handle negative spiffs
+                negatives = tech_group[tech_group['Amount'] < 0]
+                total_negative = negatives['Amount'].sum()
+                
+                if total_negative < 0:
+                    negative_entries.append({
+                        'Technician': tech_name,
+                        'Badge ID': badge_id,
+                        'Department': tech_home_dept,
+                        'Amount': total_negative,
+                        'Type': 'Consolidated Negative',
+                        'Memo': f"Consolidated negative spiffs for {tech_name}"
+                    })
+                
+                # Handle positive spiffs
+                positives = tech_group[tech_group['Amount'] > 0]
+                for _, spiff in positives.iterrows():
+                    positive_entries.append({
+                        'Technician': tech_name,
+                        'Badge ID': badge_id,
+                        'Department': spiff['Service Department'],
+                        'Amount': spiff['Amount'],
+                        'Memo': spiff['Memo'],
+                        'Type': 'Positive'
+                    })
+            except Exception as e:
+                logger.warning(f"Error processing spiffs for {tech_name}: {str(e)}")
+                continue
+        
+        # Create final DataFrames
+        matched_df = pd.DataFrame(positive_entries)
         neg_df = pd.DataFrame(negative_entries)
         
         logger.info(f"Successfully processed adjustments:")
         logger.info(f"  TGL entries: {len(tgl_df)}")
-        logger.info(f"  Positive spiffs: {len(spiff_df)}")
-        logger.info(f"  Techs with negative spiffs: {len(neg_df)}")
+        logger.info(f"  Positive spiffs: {len(matched_df)}")
+        logger.info(f"  Negative spiffs: {len(neg_df)}")
         
-        return tgl_df, spiff_df, spiff_df, neg_df
+        return tgl_df, matched_df, matched_df, neg_df
         
     except Exception as e:
         logger.error(f"Error processing adjustments: {str(e)}")
@@ -2088,12 +2153,6 @@ def process_adjustments(combined_file: str, logger: logging.Logger) -> Tuple[pd.
 def save_payroll_file(entries: List[PayrollEntry], output_file: str, logger: logging.Logger):
     """Save payroll entries to Excel file with specific formatting and validation."""
     try:
-        # Define standard column order
-        PAYROLL_COLUMNS = [
-            'Company Code', 'Badge ID', 'Date', 'Amount', 
-            'Pay Code', 'Dept', 'Location ID'
-        ]
-        
         # Convert entries to DataFrame
         df = pd.DataFrame([{
             'Company Code': entry.company_code,
@@ -2111,8 +2170,8 @@ def save_payroll_file(entries: List[PayrollEntry], output_file: str, logger: log
             logger.warning("Found multiple entries for same Badge ID, Department, and Pay Code. Consolidating...")
             df = duplicate_check
         
-        # Sort entries and ensure column order
-        df = df[PAYROLL_COLUMNS].sort_values(['Badge ID', 'Pay Code'])
+        # Sort entries by Badge ID and Pay Code
+        df = df.sort_values(['Badge ID', 'Pay Code'])
         
         # Validate entries
         for idx, row in df.iterrows():
@@ -2135,8 +2194,7 @@ def save_payroll_file(entries: List[PayrollEntry], output_file: str, logger: log
             except Exception as e:
                 logger.error(f"Error validating row {idx}: {str(e)}")
                 continue
-        df['Amount'] = df['Amount'].round(2)  # Round to 2 decimals
-        df['Amount'] = df['Amount'].apply(lambda x: '{:.2f}'.format(x))
+        
         # Write to Excel with formatting
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             df.to_excel(writer, index=False)
@@ -2160,7 +2218,6 @@ def save_payroll_file(entries: List[PayrollEntry], output_file: str, logger: log
                     for cell in worksheet[col_letter]:
                         cell.alignment = Alignment(horizontal='right')
                         if cell.row > 1:  # Skip header
-                            print(f"Amount before formatting: {cell.value}, Type: {type(cell.value)}")
                             cell.number_format = '#,##0.00'
                 
                 # Center align other columns
@@ -2183,105 +2240,28 @@ def save_adjustment_files(tgl_df: pd.DataFrame, matched_df: pd.DataFrame,
                         matched_file: str, pos_file: str, 
                         neg_file: str, tech_data: pd.DataFrame,
                         base_date: datetime, logger: logging.Logger):
-    """Save adjustment files."""
+    """
+    Save adjustment files with updated spiff consolidation logic.
+    
+    Args:
+        tgl_df (pd.DataFrame): TGL entries
+        matched_df (pd.DataFrame): Matched spiff entries
+        pos_df (pd.DataFrame): Positive spiff entries
+        neg_df (pd.DataFrame): Negative spiff entries (consolidated)
+        matched_file (str): Path for consolidated spiffs output
+        pos_file (str): Path for positive spiffs reference
+        neg_file (str): Path for negative spiffs reference
+        tech_data (pd.DataFrame): Technician information
+        base_date (datetime): Base date for processing
+        logger (logging.Logger): Logger instance
+    """
     try:
         # Calculate week end date for entries
         start_of_week = base_date - timedelta(days=base_date.weekday())
         week_end_date = start_of_week + timedelta(days=6)
         target_date = week_end_date.strftime('%m/%d/%Y')
         
-        # Initialize lists for tracking entries
         payroll_entries = []
-        final_negative_entries = []
-        
-        # Read PCM entries from payroll file first
-        payroll_file = os.path.join(os.path.dirname(matched_file), 'payroll.xlsx')
-        try:
-            all_payroll_entries = pd.read_excel(payroll_file, dtype={'Badge ID': str})
-            # Filter for PCM entries only for processing negatives
-            pcm_df = all_payroll_entries[all_payroll_entries['Pay Code'] == 'PCM'].copy()
-            # Ensure Badge ID is properly formatted with THREE leading zeros
-            pcm_df['Badge ID'] = pcm_df['Badge ID'].apply(format_badge_id)
-        except Exception as e:
-            logger.error(f"Error reading payroll file: {str(e)}")
-            all_payroll_entries = pd.DataFrame()
-            pcm_df = pd.DataFrame()
-        
-        # Helper function to normalize department codes (for comparison only)
-        def normalize_dept(dept):
-            try:
-                # Convert to string, remove any leading/trailing spaces and leading zeros
-                return str(int(str(dept).strip()))
-            except (ValueError, TypeError):
-                return str(dept).strip()
-        
-        # Process each tech's total negative against their PCM entry first
-        updated_pcm_entries = []
-        
-        for _, neg_row in neg_df.iterrows():
-            try:
-                tech_badge_id = format_badge_id(neg_row['Badge ID'])
-                home_dept = neg_row['Service Department']
-                total_negative = abs(float(str(neg_row['Amount']).replace('$', '').replace(',', '')))
-                
-                # Look for PCM entry with matching badge ID and department
-                if not pcm_df.empty:
-                    # Create temporary normalized columns for comparison
-                    normalized_home_dept = normalize_dept(home_dept)
-                    temp_normalized = pcm_df['Dept'].apply(normalize_dept)
-                    
-                    # Debug logging
-                    logger.debug(f"\nProcessing Badge ID: {tech_badge_id}")
-                    logger.debug(f"Looking for department: {normalized_home_dept}")
-                    logger.debug(f"Available PCM departments: {pcm_df['Dept'].tolist()}")
-                    logger.debug(f"Normalized PCM departments: {temp_normalized.tolist()}")
-                    
-                    # Find matching entries using normalized departments
-                    pcm_entries = pcm_df[
-                        (pcm_df['Badge ID'] == tech_badge_id) &
-                        (temp_normalized == normalized_home_dept)
-                    ]
-                    
-                    logger.debug(f"Found matching PCM entries: {len(pcm_entries)}")
-                    if not pcm_entries.empty:
-                        logger.debug(f"PCM entries found:\n{pcm_entries}")
-                    
-                    if not pcm_entries.empty:
-                        # Get the PCM amount
-                        current_amount = float(str(pcm_entries.iloc[0]['Amount']).replace('$', '').replace(',', ''))
-                        new_amount = current_amount - total_negative
-                        
-                        logger.debug(f"Current PCM amount: ${current_amount:,.2f}")
-                        logger.debug(f"Negative amount to subtract: ${total_negative:,.2f}")
-                        logger.debug(f"New amount after subtraction: ${new_amount:,.2f}")
-                        
-                        if new_amount > 0:
-                            # Create updated PCM entry
-                            updated_entry = pcm_entries.iloc[0].copy()
-                            updated_entry['Amount'] = new_amount
-                            updated_pcm_entries.append(updated_entry)
-                            logger.debug(f"Updated PCM entry for Badge ID {tech_badge_id}: ${current_amount:,.2f} - ${total_negative:,.2f} = ${new_amount:,.2f}")
-                            
-                            # Remove this entry from pcm_df to prevent double processing
-                            pcm_df = pcm_df.drop(pcm_entries.index)
-                            continue  # Skip adding to final_negative_entries since we handled it
-                    
-                    # If we get here, either no PCM entry was found or new_amount <= 0
-                    final_negative_entries.append({
-                        'Technician': neg_row['Technician'],
-                        'Badge ID': tech_badge_id,  # Already formatted with THREE leading zeros
-                        'Service Department': home_dept,
-                        'Amount': -total_negative,
-                        'Type': 'Consolidated Negative',
-                        'Memo': f"No matching PCM entry found for total negative spiffs of ${total_negative:,.2f}"
-                    })
-                
-            except Exception as e:
-                logger.warning(f"Error processing negative adjustment: {str(e)}")
-                continue
-        
-        # Consolidate spiffs by Badge ID and Department
-        spiff_groups = {}  # (badge_id, dept) -> total_amount
         
         # Process TGLs
         for _, row in tgl_df.iterrows():
@@ -2290,21 +2270,30 @@ def save_adjustment_files(tgl_df: pd.DataFrame, matched_df: pd.DataFrame,
                 
             tech_name = row['Technician']
             if tech_name in EXCLUDED_TECHS:
+                logger.debug(f"Skipping TGL entry for excluded tech {tech_name}")
                 continue
             
             try:
-                amount = float(str(row['Amount']).replace('$', '').replace(',', ''))
-                badge_id = format_badge_id(row['Badge ID'])
-                dept = row['Service Department']
+                amount = abs(float(str(row['Amount']).replace('$', '').replace(',', '')))
                 
-                key = (badge_id, dept)
-                spiff_groups[key] = spiff_groups.get(key, 0) + amount
+                # Create TGL entry using service department code
+                payroll_entries.append({
+                    'Company Code': COMPANY_CODE,
+                    'Badge ID': row['Badge ID'],
+                    'Date': target_date,
+                    'Amount': amount,
+                    'Pay Code': 'SPF',
+                    'Dept': row['Department'],
+                    'Location ID': LOCATION_ID
+                })
+                
+                logger.debug(f"Added TGL entry for {tech_name}: ${amount:,.2f} in dept {row['Department']}")
                 
             except (ValueError, TypeError) as e:
                 logger.warning(f"Error processing TGL amount for {tech_name}: {str(e)}")
                 continue
         
-        # Process positive spiffs
+        # Process positive spiffs by service department
         for _, row in matched_df.iterrows():
             if pd.isna(row['Amount']) or row['Amount'] <= 0:
                 continue
@@ -2315,69 +2304,46 @@ def save_adjustment_files(tgl_df: pd.DataFrame, matched_df: pd.DataFrame,
                 
             try:
                 amount = float(str(row['Amount']).replace('$', '').replace(',', ''))
-                badge_id = format_badge_id(row['Badge ID'])
-                dept = row['Service Department']
                 
-                key = (badge_id, dept)
-                spiff_groups[key] = spiff_groups.get(key, 0) + amount
+                payroll_entries.append({
+                    'Company Code': COMPANY_CODE,
+                    'Badge ID': row['Badge ID'],
+                    'Date': target_date,
+                    'Amount': amount,
+                    'Pay Code': 'SPF',
+                    'Dept': row['Department'],
+                    'Location ID': LOCATION_ID
+                })
+                
+                logger.debug(f"Added positive spiff for {tech_name}: ${amount:,.2f} in dept {row['Department']}")
                 
             except (ValueError, TypeError) as e:
                 logger.warning(f"Error processing positive spiff for {tech_name}: {str(e)}")
                 continue
         
-        # Convert consolidated spiffs to payroll entries
-        for (badge_id, dept), amount in spiff_groups.items():
-            payroll_entries.append({
-                'Company Code': COMPANY_CODE,
-                'Badge ID': badge_id,  # Already formatted
-                'Date': target_date,
-                'Amount': amount,
-                'Pay Code': 'SPF',
-                'Dept': dept,
-                'Location ID': LOCATION_ID
-            })
-        
-        # Update the payroll file with modified PCM entries
-        if updated_pcm_entries:
-            updated_pcm_df = pd.DataFrame(updated_pcm_entries)
+        # Create consolidated payroll file
+        if payroll_entries:
+            payroll_df = pd.DataFrame(payroll_entries)
             
-            # Remove old PCM entries that were updated
-            for _, updated_entry in updated_pcm_df.iterrows():
-                mask = (
-                    (all_payroll_entries['Badge ID'] == updated_entry['Badge ID']) &
-                    (all_payroll_entries['Pay Code'] == 'PCM') &
-                    (all_payroll_entries['Dept'] == updated_entry['Dept'])
-                )
-                all_payroll_entries = all_payroll_entries[~mask]
+            # Group by all fields except Amount and sum the amounts
+            consolidated_df = payroll_df.groupby([
+                'Company Code', 'Badge ID', 'Date', 'Pay Code', 'Dept', 'Location ID'
+            ]).agg({
+                'Amount': 'sum'
+            }).reset_index()
             
-            # Add updated PCM entries
-            all_payroll_entries = pd.concat([all_payroll_entries, updated_pcm_df], ignore_index=True)
+            # Sort by Badge ID and Department
+            consolidated_df = consolidated_df.sort_values(['Badge ID', 'Dept'])
             
-            # Save back to payroll file
-            all_payroll_entries = all_payroll_entries.sort_values(['Badge ID', 'Pay Code'])
-            with pd.ExcelWriter(payroll_file, engine='openpyxl') as writer:
-                all_payroll_entries.to_excel(writer, index=False)
-                autofit_columns(writer.sheets['Sheet1'])
-            
-            logger.info(f"Updated {len(updated_pcm_entries)} PCM entries in payroll file")
-        
-        # Convert payroll entries to DataFrame
-        payroll_df = pd.DataFrame(payroll_entries)
-
-        payroll_df['Amount'] = payroll_df['Amount'].round(2)  # Round to 2 decimals
-        payroll_df['Amount'] = payroll_df['Amount'].apply(lambda x: '{:.2f}'.format(x))
-
-        # Save spiffs file
-        if not payroll_df.empty:
-            payroll_df = payroll_df.sort_values(['Badge ID', 'Dept'])
-            
+            # Save consolidated spiffs file
             with pd.ExcelWriter(matched_file, engine='openpyxl') as writer:
-                payroll_df.to_excel(writer, index=False)
+                consolidated_df.to_excel(writer, index=False)
                 worksheet = writer.sheets['Sheet1']
                 
-                for idx, col in enumerate(payroll_df.columns):
+                # Format columns
+                for idx, col in enumerate(consolidated_df.columns):
                     max_length = max(
-                        payroll_df[col].astype(str).apply(len).max(),
+                        consolidated_df[col].astype(str).apply(len).max(),
                         len(str(col))
                     ) + 2
                     
@@ -2392,10 +2358,10 @@ def save_adjustment_files(tgl_df: pd.DataFrame, matched_df: pd.DataFrame,
                             cell.alignment = Alignment(horizontal='right')
                             if cell.row > 1:
                                 cell.number_format = '#,##0.00'
-                    else:
-                        for cell in worksheet[col_letter]:
-                            cell.alignment = Alignment(horizontal='center')
+                                
+                logger.info(f"Saved consolidated spiffs to {matched_file}")
         else:
+            # Create empty consolidated file with correct columns
             empty_df = pd.DataFrame(columns=[
                 'Company Code', 'Badge ID', 'Date', 'Amount', 
                 'Pay Code', 'Dept', 'Location ID'
@@ -2404,25 +2370,30 @@ def save_adjustment_files(tgl_df: pd.DataFrame, matched_df: pd.DataFrame,
                 empty_df.to_excel(writer, index=False)
                 autofit_columns(writer.sheets['Sheet1'])
         
-        # Save reference files
+        # Save reference files with additional details
+        
+        # Positive spiffs reference file
         pos_reference_df = matched_df.copy()
         pos_reference_df['Processing Date'] = target_date
+        pos_reference_df['Original Department'] = pos_reference_df['Memo'].apply(
+            lambda x: extract_dept_code(str(x))
+        )
         
         with pd.ExcelWriter(pos_file, engine='openpyxl') as writer:
             pos_reference_df.to_excel(writer, index=False)
             autofit_columns(writer.sheets['Sheet1'])
-        
-        # Save negative adjustments
-        neg_reference_df = pd.DataFrame(final_negative_entries)
-        if not neg_reference_df.empty:
-            neg_reference_df['Processing Date'] = target_date
+            
+        # Negative spiffs reference file (with home department consolidation)
+        neg_reference_df = neg_df.copy()
+        neg_reference_df['Processing Date'] = target_date
+        neg_reference_df['Notes'] = 'Consolidated negative spiffs by home department'
         
         with pd.ExcelWriter(neg_file, engine='openpyxl') as writer:
             neg_reference_df.to_excel(writer, index=False)
             autofit_columns(writer.sheets['Sheet1'])
-        
+            
         logger.info(f"Successfully saved adjustment files:")
-        logger.info(f"  Payroll entries: {len(payroll_df) if not payroll_df.empty else 0}")
+        logger.info(f"  Consolidated entries: {len(consolidated_df) if payroll_entries else 0}")
         logger.info(f"  Positive reference entries: {len(pos_reference_df)}")
         logger.info(f"  Negative reference entries: {len(neg_reference_df)}")
         
@@ -2689,7 +2660,7 @@ def process_payroll(base_path: str, output_dir: str, base_date: datetime, logger
         # Save output files
         save_payroll_file(all_payroll_entries, payroll_file, logger)
         save_adjustment_files(tgl_df, matched_df, pos_df, neg_df, matched_file, 
-                            adj_pos_file, adj_neg_file, tech_data, base_date, logger)
+                            adj_pos_file, adj_neg_file, tech_data, logger)
         
         logger.info("Payroll processing completed successfully!")
         logger.info(f"Service tech commission entries: {len(payroll_entries)}")

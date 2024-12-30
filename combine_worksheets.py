@@ -151,7 +151,7 @@ def combine_workbooks(directory, output_file):
 
 # Usage
 directory = r'C:\Users\abatlouni\Downloads'
-output_file = os.path.join(directory, 'combined_data.xlsx')
+output_file = os.path.join(directory, 'combined_data1.xlsx')
 
 try:
     combine_workbooks(directory, output_file)

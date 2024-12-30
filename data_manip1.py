@@ -67,35 +67,6 @@ plumbing_electrical_thresholds = {
     100: [18000, 20000, 22000, 24000]
 }
 
-TECH_BADGE_MAP = {
-"Andrew Wycoff": "J6P100665",
-"Andy Ventura": "J6P100622",
-"Artie Straniti": "J6P100524",
-"Brett Allen": "J6P100591",
-"Carter Bruce": "J6P100426",
-"Chris Smith": "J6P100430",
-"David Knox": "J6P100633",
-"Ethan Ficklin": "J6P100310",
-"Garrett Caine": "J6P100522",
-"Glenn Griffin": "J6P100297",
-"Hunter Stanley": "J6P100536",
-"Jacob Simpson": "J6P100512",
-"Jake West": "J6P100520",
-"John Williams": "J6P100529",
-"Josue Rodriguez": "J6P100553",
-"Justin Barron": "J6P100377",
-"Kevin Stanley": "J6P100655",
-"Pablo Silvas": "J6P100594",
-"Patrick Bowerman": "J6P100502",
-"Robert McGhee": "J6P100667",
-"Ronnie Bland": "J6P100133",
-"Shawn Hollingsworth": "J6P100696",
-"Stephen Starner": "J6P100521",
-"Thomas Shawaryn": "J6P100434",
-"Tim Miller": "J6P100485",
-"WT Settle": "J6P100283",
-"Will Winfree": "J6P100708"
-}
 
 SUBDEPARTMENT_MAP = {
     '00': '00 - ADMINISTRATIVE',
@@ -116,6 +87,18 @@ SUBDEPARTMENT_MAP = {
     '30': '30 - PLUMBING SERVICE'
 }
 
+def get_tech_data(file_path: str) -> pd.DataFrame:
+    """Read technician data from Sheet1_Tech."""
+    try:
+        tech_data = pd.read_excel(file_path, sheet_name='Sheet1_Tech')
+        required_columns = ['Name', 'Payroll ID', 'Technician Business Unit']
+        missing_columns = [col for col in required_columns if col not in tech_data.columns]
+        if missing_columns:
+            raise ValueError(f"Missing required columns in Sheet1_Tech: {missing_columns}")
+        return tech_data
+    except Exception as e:
+        logger.error(f"Error reading technician data: {str(e)}")
+        raise
 
 def setup_logging():
     logger = logging.getLogger('commission_calculator')
@@ -645,9 +628,9 @@ def get_commission_rate(total_revenue: float, flipped_percent: float, department
     return rate, adjusted_thresholds, tier_thresholds
 
 def main():
-    technicians_to_track = list(TECH_BADGE_MAP.keys())
+    technicians_to_track = []  # Will be populated from Sheet1_Tech
     
-    file_path = r'C:\Users\abatlouni\Downloads\combined_data1.xlsx'
+    file_path = r'C:\Users\abatlouni\Downloads\combined_data.xlsx'
     logger.info(f"Loading data from {file_path}")
     
     # Get the base date once at the start
@@ -655,7 +638,11 @@ def main():
     
     try:
         data = pd.read_excel(file_path, sheet_name='Sheet1')
-        tech_data = pd.read_excel(file_path, sheet_name='Sheet1_Tech')
+        tech_data = get_tech_data(file_path)
+        
+        # Get list of technicians from Sheet1_Tech
+        technicians_to_track = tech_data['Name'].tolist()
+        
     except Exception as e:
         logger.error(f"Error loading Excel sheets: {e}")
         sys.exit(1)
@@ -670,52 +657,40 @@ def main():
     excused_hours_dict = get_excused_hours(file_path, base_date)
     
     tech_dept_map = dict(zip(tech_data['Name'], tech_data['Technician Business Unit']))
+    tech_badge_map = dict(zip(tech_data['Name'], tech_data['Payroll ID']))
     
     results = []
 
     for tech_name in technicians_to_track:
         logger.info(f"\nProcessing technician: {tech_name}")
-        badge_id = TECH_BADGE_MAP.get(tech_name, '')
+        badge_id = tech_badge_map.get(tech_name, '')  # Get badge ID from Sheet1_Tech data
         
-        # Basic calculations with subdepartment tracking
+        # Rest of the processing remains the same...
         box_a, box_b, box_c, subdept_breakdown = calculate_box_metrics(data, tech_name, base_date)
         scp, icp = calculate_percentages(box_a, box_c)
         
-        # Calculate department-specific revenue
         dept_revenue = calculate_department_revenue(data, tech_name, base_date)
-        
-        # Get spiffs with department breakdown
         spiffs_total, department_spiffs = get_spiffs_total(file_path, tech_name)
-        
-        # Get valid TGLs
         valid_tgls = get_valid_tgls(file_path, tech_name)
-        
-        # Calculate average ticket values
         avg_tickets = calculate_average_ticket_value(data, tech_name, box_a, box_b, base_date, logger)
         default_ticket = 0.0
         avg_ticket_value = avg_tickets.get('overall', default_ticket) if avg_tickets else default_ticket
         
-        # Get department
         dept_unit_str = tech_dept_map.get(tech_name, '0')
         dept_num = extract_department_number(dept_unit_str)
         department = get_department_from_number(dept_num)
         department_with_code = get_department_with_code(dept_num)
 
-        # Calculate TGL threshold reduction
         tgl_reduction = avg_ticket_value * len(valid_tgls) if avg_ticket_value > 0 else 0
-        
         excused_hours = excused_hours_dict.get(tech_name, 0)
         
-        # Calculate commission rate using ICP
         commission_rate, adjusted_thresholds, base_thresholds = get_commission_rate(
             box_c, icp, department, excused_hours, tgl_reduction
         )
         
-        # Format threshold scales
         base_threshold_scale = format_threshold_scale(base_thresholds)
         adjusted_threshold_scale = format_threshold_scale(adjusted_thresholds)
         
-        # Format revenue data including subdepartments
         formatted_dept_data = format_department_revenue(
             dept_revenue,
             commission_rate,
@@ -723,11 +698,9 @@ def main():
             subdept_breakdown
         )
         
-        # Calculate total commissionable revenue
         commissionable_revenue = box_c - spiffs_total
         final_commission = commissionable_revenue * commission_rate
         
-        # Build result dictionary
         result = {
             'Badge ID': badge_id,
             'Technician': tech_name,
@@ -750,9 +723,7 @@ def main():
             'Status': f"Qualified for {commission_rate*100}% tier" if commission_rate > 0 else "Did not qualify"
         }
         
-        # Add formatted department and subdepartment data
         result.update(formatted_dept_data)
-        
         results.append(result)
 
     results_df = pd.DataFrame(results)
@@ -765,7 +736,7 @@ def main():
     # Reorder columns
     results_df = results_df[COLUMN_ORDER]
     
-    output_path = r'C:\Users\abatlouni\Downloads\paystats1.xlsx'
+    output_path = r'C:\Users\abatlouni\Downloads\paystats.xlsx'
     logger.info(f"\nWriting results to {output_path}")
 
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
