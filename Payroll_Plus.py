@@ -522,19 +522,6 @@ def consolidate_negative_spiffs(tech_data: pd.DataFrame, spiffs_df: pd.DataFrame
 
 def process_pcm_entry(tech_data: pd.DataFrame, tech_name: str, subdept_code: str, 
                      amount: float, date: str) -> Optional[PayrollEntry]:
-    """
-    Create a PCM entry using the service department's main code.
-    
-    Args:
-        tech_data (pd.DataFrame): DataFrame containing technician information
-        tech_name (str): Name of the technician
-        subdept_code (str): Two-digit subdepartment code where service was performed
-        amount (float): Commission amount
-        date (str): Target date for the entry
-        
-    Returns:
-        Optional[PayrollEntry]: PayrollEntry object or None if invalid
-    """
     try:
         # Get technician info
         tech_info = tech_data[tech_data['Name'] == tech_name]
@@ -1558,20 +1545,6 @@ def sum_spiffs_for_dept(spiffs_df: pd.DataFrame, tech_name: str, dept_code: str)
 
 def process_paystats(output_dir: str, paystats_file: str, tech_data: pd.DataFrame, 
                     base_date: datetime, logger: logging.Logger) -> List[PayrollEntry]:
-    """
-    Process payroll entries for service technicians from paystats file with updated department logic.
-    Now uses service department codes for PCM entries regardless of technician's home department.
-    
-    Args:
-        output_dir (str): Directory containing output files
-        paystats_file (str): Path to the paystats Excel file
-        tech_data (pd.DataFrame): DataFrame containing technician information
-        base_date (datetime): Base date for processing
-        logger (logging.Logger): Logger instance
-        
-    Returns:
-        List[PayrollEntry]: List of processed payroll entries
-    """
     logger.info("Processing payroll entries from paystats file...")
     payroll_entries = []
 
