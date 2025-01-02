@@ -1,10 +1,13 @@
 # Payroll Processing System
 
 ## Overview
+
 This system automates the processing of payroll data, including commission calculations for service technicians and GP (Gross Profit) entries for installers. It handles various types of compensation including PCM (Service Tech Commission), ICM (Installer Commission), and SPF (Spiffs/TGL).
 
 ## Required Files
+
 All files must be in your Downloads folder:
+
 1. UUID file (format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.xlsx`)
 2. Jobs Report (format: `Copy of Jobs Report for Performance -DE2_Dated MM_DD_YY - MM_DD_YY.xlsx`)
 3. Tech Department file (format: `Technician Department_Dated MM_DD_YY - MM_DD_YY.xlsx`)
@@ -12,6 +15,7 @@ All files must be in your Downloads folder:
 5. TGL file (format: `TGLs Set _Dated MM_DD_YY - MM_DD_YY.xlsx`)
 
 ## Features
+
 - Separate processing for service technicians and installers
 - Commission calculations based on department thresholds
 - Automatic handling of TGLs and spiffs
@@ -21,6 +25,7 @@ All files must be in your Downloads folder:
 - Automated file organization and output generation
 
 ## Department Codes
+
 - HVAC: 20-29
   - 20: HVAC SERVICE
   - 21: HVAC INSTALL
@@ -39,7 +44,9 @@ All files must be in your Downloads folder:
   - 42: GENERATOR MAINTENANCE
 
 ## Output Files
+
 The system generates several output files in a dated directory:
+
 - `combined_data.xlsx`: Consolidated data from all input files
 - `paystats.xlsx`: Commission calculations and metrics
 - `payroll.xlsx`: Final payroll entries
@@ -48,7 +55,9 @@ The system generates several output files in a dated directory:
 - `negative_adjustments.xlsx`: Reference file for negative adjustments
 
 ## Commission Calculation Details
+
 ### Service Technicians (PCM)
+
 - Commission rates: 2%, 3%, 4%, or 5% based on thresholds
 - Thresholds adjusted by:
   - Install Contribution Percentage (ICP)
@@ -59,16 +68,19 @@ The system generates several output files in a dated directory:
   - Tech-Sourced Install Sales (TSIS)
 
 ### Installers (ICM)
+
 - GP-based compensation
 - Processed by department and job
 - Automatic consolidation of multiple entries
 
 ### Spiffs and TGLs
+
 - Automatic processing of positive and negative spiffs
 - Department-specific TGL validation
 - Consolidated negative spiffs applied to PCM entries
 
 ## Usage
+
 1. Ensure all required files are in the Downloads folder
 2. Run the script
 3. Enter the target date when prompted (format: MM/DD/YY)
@@ -76,12 +88,14 @@ The system generates several output files in a dated directory:
 5. Review output files in the generated directory
 
 ## Error Handling
+
 - File validation before processing
 - Comprehensive logging of all operations
 - Clear error messages for missing or invalid files
 - Automatic data cleaning and validation
 
 ## Technical Notes
+
 - Uses Python with pandas for data processing
 - Excel manipulation via openpyxl
 - Configured for J6P company code and L100 location ID
@@ -89,6 +103,7 @@ The system generates several output files in a dated directory:
 - Implements robust error checking and validation
 
 ## Dependencies
+
 - pandas
 - openpyxl
 - logging
